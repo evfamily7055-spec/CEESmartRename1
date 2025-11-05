@@ -267,6 +267,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     # 応答スキーマを Pydantic モデルから直接生成
     response_schema = AICoreResponse.model_json_schema()
 
+    # 修正: system_instruction を contents の先頭要素として追加
     system_instruction = f"""
     あなたはファイルの内容を分析し、リネームのための構造化データを抽出するAIです。
 
@@ -287,6 +288,8 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     """
     
     parts = []
+    # 修正: system_instruction を contents の最初の要素として追加
+    parts.append(system_instruction) 
     
     if is_asr:
         st.info("⬆️ 音声ファイルをGemini APIにアップロードし、文字起こしと分析を同時に行います。")
@@ -319,12 +322,11 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
         response = client.models.generate_content(
             model='gemini-2.5-flash-preview-09-2025',
             contents=parts,
-            system_instruction=system_instruction,
+            # 修正: system_instruction 引数を削除
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 # Pydantic スキーマを直接渡す
                 response_schema=response_schema, 
-                # 修正: 'timeout=120' を削除
             )
         )
         
