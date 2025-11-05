@@ -44,15 +44,13 @@ Category = Literal["論文", "請求書・領収書", "その他", "不明"]
 
 class AICoreResponse(BaseModel):
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
-    # 修正点 1: extracted_data の型を具体的な Pydantic モデルのユニオンに変更
+    # extracted_data の型を具体的な Pydantic モデルのユニオンに変更
     extracted_data: Optional[Union[PaperData, InvoiceData, OtherData]] = Field( 
         None, 
         description="分類に応じた抽出データを含むオブジェクト。不明の場合は null にしてください。このフィールドの構造は category の値に依存します。"
     )
     reasoning: str = Field(description="LLMがその分類と抽出を行った根拠。")
     transcript: Optional[str] = Field(None, description="音声ファイルが入力された場合の文字起こし結果。")
-
-# 修正点 2: get_json_schema_for_gemini 関数を削除し、直接 AICoreResponse.model_json_schema() を使用
 
 # ----------------------------------------------------------------------
 # 2. バックエンド処理機能 (ファイル抽出とAIコア連携)
@@ -305,6 +303,10 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     final_response = None
     uploaded_file_gemini = locals().get('uploaded_file_gemini') # finallyブロックのために定義
     
+    # --- 修正箇所: response_text を try ブロック外で初期化 ---
+    response_text = ""
+    # --------------------------------------------------------
+
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash-preview-09-2025',
@@ -318,7 +320,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
             )
         )
         
-        # --- JSONパース前のクリーンアップ (前回の修正を保持) ---
+        # --- JSONパース前のクリーンアップ ---
         response_text = response.text.strip()
         if response_text.startswith("```json"):
             response_text = response_text[7:].strip()
@@ -330,7 +332,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
 
         response_json = json.loads(response_text)
         
-        # 修正点 3: Pydantic の Union 型検証により、一度のバリデーションで済む
+        # Pydantic の Union 型検証により、一度のバリデーションで済む
         final_response = AICoreResponse.model_validate(response_json)
         
         return final_response
@@ -344,7 +346,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     except ValidationError as e:
         # Pydantic の厳密な検証 (Union型を含む) に失敗した場合
         st.error(f"❌ 構造化データ検証失敗: LLMの出力が要求スキーマに一致しません。")
-        # デバッグのためにエラーの詳細をログ出力
+        # response_text が確実に定義されているため、ここで参照しても安全
         st.json({"validation_error_details": e.errors(), "raw_response_text": response_text[:500]})
         
         return AICoreResponse(category="不明", extracted_data=None, reasoning="AI応答がAICoreResponseスキーマ検証に失敗しました。詳細をログで確認してください。")
