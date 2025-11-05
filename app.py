@@ -204,11 +204,16 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     """
     Gemini APIの代わりに、ローカルのルールベースでファイル内容を分析し、構造化データを生成する。
     """
+    
+    # ------------------------------------------------------------------
+    # 0. 音声ファイル処理 (文字起こしと分析)
+    # ------------------------------------------------------------------
     if is_asr:
         # ⚠️ 音声ファイル処理のモック (要件 4. ASR)
         transcript = "モック文字起こし: 2023年10月5日、田中商事から15000円の請求書を受領しました。件名はソフトウェアライセンスです。"
+        st.info("🔎 **分析開始**: 音声ファイルのため、文字起こし結果（モック）に基づき文書分類を行います。")
         
-        # モックの抽出データ
+        # モックの抽出データ（文字起こし結果に基づくと仮定）
         data = InvoiceData(
             invoice_date="2023-10-05",
             invoice_amount="15000円",
@@ -218,13 +223,16 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="請求書・領収書",
             extracted_data=data,
-            reasoning="音声ファイルでしたが、ローカルASRモックにより請求情報が検出されました。",
+            reasoning="音声ファイルが検出されました。ローカルASRモックにより文字起こしを行い、その結果から請求情報（日付、金額、発行元）を検出しました。",
             transcript=transcript
         )
 
     # 文書ファイルの内容分析 (ルールベース)
     lower_text = text_content.lower()
     first_10_lines = '\n'.join(text_content.split('\n')[:10]).strip() # 先頭10行を分析
+    
+    # 処理状況の表示
+    st.info("🔎 **分析開始**: 文書ファイルの内容をローカルルールでスコアリングします。")
     
     # スコアリング基準
     score_invoice = 0
@@ -237,14 +245,17 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     invoice_keywords = ["請求書", "領収書", "明細", "invoice", "receipt", "合計金額", "御中"]
     if any(keyword in lower_text for keyword in invoice_keywords):
         score_invoice += 5
+        st.info(f"→ 請求書キーワード検出 ({score_invoice}点)")
     
     date_match = re.search(r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)", first_10_lines)
     amount_match = re.search(r"([¥￥$€£]\s*[\d,]+\.?\d*|[\d,]+\s*(円|yen))", first_10_lines)
     
     if date_match:
         score_invoice += 5 # 日付検出
+        st.info(f"→ ヘッダーで日付パターン検出 (+5点, 現在{score_invoice}点)")
     if amount_match:
         score_invoice += 5 # 金額検出
+        st.info(f"→ ヘッダーで金額パターン検出 (+5点, 現在{score_invoice}点)")
     
     # ------------------------------------------------------------------
     # 2. 論文 ルール (スコアベース)
@@ -256,23 +267,30 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     ]
     if any(keyword in lower_text for keyword in paper_keywords):
         score_paper += 5
+        st.info(f"→ 論文キーワード検出 ({score_paper}点)")
     
     # ヘッダーに著者名（氏名＋機関名）のパターンがあるか
+    # 強化: 著者名のパターンは Title/Author/Abstract のすぐ後にあることが多い
     author_pattern = re.search(r"(?:Author|著者)\s*[:]?\s*([A-Z][a-z]+(?:\s*[A-Z][a-z]+)?)\s*\((.+?)\)", first_10_lines)
     
     # 年号と著者名がヘッダーにあるか
     year_match_paper = re.search(r"(\d{4})", first_10_lines)
     if author_pattern:
         score_paper += 10 # 構造的な著者情報検出
+        st.info(f"→ 構造的著者情報（氏名と所属）検出 (+10点, 現在{score_paper}点)")
     if year_match_paper and score_paper > 0:
         score_paper += 3 # 年号が検出され、かつ論文の可能性が高い場合
+        st.info(f"→ ヘッダーで年号パターン検出 (+3点, 現在{score_paper}点)")
         
     # ------------------------------------------------------------------
     # 3. 最終判定ロジック
     # ------------------------------------------------------------------
     
+    reasoning_detail = f"（論文スコア: {score_paper}, 請求書スコア: {score_invoice}）"
+    
+    # 論文と判定
     if score_paper >= 10 and score_paper > score_invoice:
-        st.success(f"✅ ローカルAI: 論文と判定 (スコア: {score_paper})")
+        st.success(f"✅ **最終判定**: 論文と決定しました。")
         
         # 抽出ロジック（論文）
         year = year_match_paper.group(1) if year_match_paper else "YYYY"
@@ -290,11 +308,12 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="論文",
             extracted_data=data,
-            reasoning=f"高度なパターンマッチング (スコア {score_paper}) により、著者、発行年、キーワードを検出しました。"
+            reasoning=f"高度なパターンマッチングにより、著者情報、発行年、論文キーワードを検出（{score_paper}点）。論文と判定しました。{reasoning_detail}",
         )
 
+    # 請求書と判定
     elif score_invoice >= 10 and score_invoice >= score_paper:
-        st.success(f"✅ ローカルAI: 請求書/領収書と判定 (スコア: {score_invoice})")
+        st.success(f"✅ **最終判定**: 請求書/領収書と決定しました。")
 
         # 抽出ロジック（請求書）
         invoice_date_raw = date_match.group(1) if date_match else "YYYYMMDD"
@@ -311,11 +330,12 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="請求書・領収書",
             extracted_data=data,
-            reasoning=f"高度なパターンマッチング (スコア {score_invoice}) により、請求キーワード、日付、金額を検出しました。"
+            reasoning=f"高度なパターンマッチングにより、請求キーワード、日付、金額（{score_invoice}点）を検出し、請求書と判定しました。{reasoning_detail}",
         )
 
     # 4. その他/不明
     if text_content.strip():
+        st.warning("⚠️ **最終判定**: 特定の文書パターンに一致しませんでした。")
         # テキストがあれば「その他」としてファイル名をタイトルとして提案
         data = OtherData(
             title=os.path.splitext(uploaded_file.name)[0]
@@ -323,9 +343,10 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="その他",
             extracted_data=data,
-            reasoning=f"特定の文書パターンに一致しませんでした (論文スコア: {score_paper}, 請求書スコア: {score_invoice})。ファイル名を元にリネームします。"
+            reasoning=f"特定の文書パターン（論文、請求書）に一致しませんでした。{reasoning_detail} ファイル名を元にリネームします。"
         )
     else:
+        st.error("❌ **最終判定**: ファイル内容が空です。")
         # テキストが空の場合
         return AICoreResponse(
             category="不明",
