@@ -284,14 +284,14 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     name_re_ja = r"([一-龠ァ-ヴーあ-ん]{2,5}(?:\s*[一-龠ァ-ヴーあ-ん]{1,5})*)" 
     name_re_en = r"([A-Z][a-z]+(?:\s[A-Z][a-z\.]*)*)" 
     
-    org_keywords_re = r"(?:大学|研究室|学部|株式会社|School of|University|Dept)" # 学部を追加
+    org_keywords_re = r"(?:大学|研究室|学部|株式会社|School of|University|Dept)" 
 
     # ヘッダー内の行リスト
     header_lines = text_lines[:10]
     
     st.info("→ 構造的な著者名パターンとタイトル候補を探索中...")
     
-    # --- 2-1. 著者名とタイトルを同時に探し、位置関係で特定するロジック ---
+    # --- 2-1. 著者名とタイトルを同時に探し、位置関係で特定するロジック (刷新) ---
     
     best_title_candidate = ""
     
@@ -315,7 +315,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
                     st.info(f"✅ 著者名パターン一致: {detected_author}")
                     score_author_doc = max(score_author_doc, 10) 
 
-                    # 著者行のさらに直前（i-2）をタイトル候補とする
+                    # 著者行のさらに直前（i-2）をタイトル候補とする (論理的にタイトルがある位置)
                     if i > 1:
                         prev_prev_line = header_lines[i-2].strip()
                         # ジャーナル情報ではない、ある程度の長さがある行をタイトル候補とする
@@ -326,7 +326,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
                     # 最も確実な情報が見つかったので、ループを終了
                     break
 
-        # 2. 著者が見つかっていない場合、最も長い行を暫定タイトルとして保持
+        # 2. 著者が見つかっていない場合、最も長い行を暫定タイトルとして保持 (フォールバック用)
         if detected_author is None:
             if len(line) > 20 and not re.search(r"Vol\.\s*\d+|Journal|ISSN|doi|SCU|抄録|Abstract", line, re.IGNORECASE):
                  if len(line) > len(best_title_candidate):
@@ -357,7 +357,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         if best_title_candidate:
             title_extracted = best_title_candidate
             
-        # 2. 抽出されたタイトルが不十分または不正な場合、フォールバック
+        # 2. 抽出されたタイトルが不十分または不正な場合、フォールバック (要約ロジックは削除)
         if not title_extracted or len(title_extracted) < 15 or '抄録' in title_extracted.lower() or 'abstract' in title_extracted.lower():
             # 抽出失敗とみなし、ファイル名をベースにタイトルを生成
             st.warning("→ タイトル抽出候補が不十分または不正なため、ファイル名をベースにタイトルを生成します。")
@@ -373,7 +373,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="論文", # 要件定義書の分類カテゴリは「論文」を維持
             extracted_data=data,
-            reasoning=f"高度なパターンマッチングにより、著者情報（氏名と所属の組み合わせ）を検出（{score_author_doc}点）。著者付き文書と判定し、タイトルは内容の要約に基づき生成しました。",
+            reasoning=f"高度なパターンマッチングにより、著者情報（氏名と所属の組み合わせ）を検出（{score_author_doc}点）。著者付き文書と判定し、タイトルを抽出しました。",
         )
 
     # 請求書と判定
