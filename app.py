@@ -43,7 +43,7 @@ class OtherData(BaseModel):
 Category = Literal["論文", "請求書・領収書", "その他", "不明"]
 
 class AICoreResponse(BaseModel):
-    # 修正点: ConfigDict を使用して余分な入力を無視する設定を追加
+    # 余分な入力を無視する設定 (Pydantic検証用。スキーマ生成後に削除)
     model_config = ConfigDict(extra='ignore')
 
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
@@ -266,6 +266,10 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     """
     # 応答スキーマを Pydantic モデルから直接生成
     response_schema = AICoreResponse.model_json_schema()
+    
+    # 修正点: スキーマから 'additionalProperties' を削除してAPIの制約に対応
+    if 'additionalProperties' in response_schema:
+        del response_schema['additionalProperties']
 
     # 修正: system_instruction を contents の先頭要素として追加
     system_instruction = f"""
@@ -511,10 +515,10 @@ if uploaded_files:
                 
                 if "対応していません" in text_content or "エラー" in text_content:
                     results.append({
-                        "オリジナルファイル名": uploaded_file.name,
-                        "処理状況": "スキップ/エラー",
-                        "分類カテゴリ": "-",
-                        "リネーム後ファイル名": uploaded_file.name,
+                        "original_filename": uploaded_file.name,
+                        "status": "Skipped/Error",
+                        "category": "-",
+                        "renamed_filename": uploaded_file.name,
                     })
                     continue
                 
