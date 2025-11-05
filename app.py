@@ -242,76 +242,93 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     # 1. 請求書/領収書 ルール (スコアベース)
     # ------------------------------------------------------------------
     
+    st.info("ステップ 1: 請求書/領収書パターンのスコアリングを開始。")
+    
     invoice_keywords = ["請求書", "領収書", "明細", "invoice", "receipt", "合計金額", "御中"]
     if any(keyword in lower_text for keyword in invoice_keywords):
         score_invoice += 5
-        st.info(f"→ 請求書キーワード検出 ({score_invoice}点)")
+        st.info(f"→ 請求書キーワード検出 (+5点, 現在{score_invoice}点)")
     
+    # 日付と金額の正規表現は、請求書のスコア判定を強化
     date_match = re.search(r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)", first_10_lines)
     amount_match = re.search(r"([¥￥$€£]\s*[\d,]+\.?\d*|[\d,]+\s*(円|yen))", first_10_lines)
     
     if date_match:
-        score_invoice += 5 # 日付検出
+        score_invoice += 5 
         st.info(f"→ ヘッダーで日付パターン検出 (+5点, 現在{score_invoice}点)")
     if amount_match:
-        score_invoice += 5 # 金額検出
+        score_invoice += 5 
         st.info(f"→ ヘッダーで金額パターン検出 (+5点, 現在{score_invoice}点)")
     
     # ------------------------------------------------------------------
     # 2. 著者付き文書 ルール (スコアベース)
     # ------------------------------------------------------------------
     
+    st.info("ステップ 2: 著者付き文書（論文/レポート）パターンのスコアリングを開始。")
+
     author_doc_keywords = [
-        "abstract", "introduction", "author", "year of publication", # 論文キーワード
-        "抄録", "緒言", "序論", "著者", "発表年", "研究報告", "キーワード", # 論文キーワード
-        "レポート", "Report", "技術資料", "作成者", "執筆者" # 一般的な著者付き文書キーワードを追加
+        "abstract", "introduction", "author", 
+        "抄録", "緒言", "序論", "著者", "発表年", "研究報告", "キーワード", 
+        "レポート", "Report", "技術資料", "作成者", "執筆者"
     ]
     if any(keyword in lower_text for keyword in author_doc_keywords):
         score_author_doc += 5
-        st.info(f"→ 著者付き文書キーワード検出 ({score_author_doc}点)")
+        st.info(f"→ 著者付き文書キーワード検出 (+5点, 現在{score_author_doc}点)")
     
-    # [再々修正ポイント] 日本語・英語の著者名と所属を確実に検出し、抽出後にクリーンアップ
+    # 著者名の検出と抽出 (日本語対応を強化)
     detected_author = None
-    
+    extracted_title_candidate = None
+
     # 日本語・英語の氏名パターン (漢字, ひらがな, カタカナ, アルファベット)
-    # 複数行にまたがるノイズ（改行やスペース）を許容するため、貪欲なマッチングにする
-    name_re_ja = r"([一-龠ァ-ヴーあ-ん]+(?:\s*[一-龠ァ-ヴーあ-ん]+)*)" # 日本語名
-    name_re_en = r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)" # 英語名
+    name_re_ja = r"([一-龠ァ-ヴーあ-ん]{2,5}(?:\s*[一-龠ァ-ヴーあ-ん]{2,5})*)" # 2-5文字の漢字・ひらがな・カタカナを検出
+    name_re_en = r"([A-Z][a-z]+(?:\s[A-Z][a-z\.]+)*)" # 英語名 (A. Smith, John Doe)
     
-    # 組織名パターン (大学, 研究所, 社, 部, 院, School of Design, University)
     org_keywords_re = r"(?:大学|研究室|株式会社|School of|University|Dept)"
 
     # ヘッダー内の行リスト
     header_lines = text_lines[:10]
     
-    # 2. 著者名の探索とキャプチャ
+    st.info("→ 構造的な著者名パターンとタイトル候補を探索中...")
+    
     for i, line in enumerate(header_lines):
         # 1. 著者名キーワード + 氏名パターンを検出 (例: 著者 町田佳世子)
         author_match = re.search(r"(?:Author|著者|作成者|執筆者)[\s:]*?" + r"(" + name_re_ja + r"|" + name_re_en + r")", line, re.IGNORECASE)
         
-        if author_match:
-            detected_author = author_match.group(1).strip()
+        # 2. 氏名のみの検出 (例: 論文タイトル後、すぐに氏名が来る場合)
+        name_only_match = re.match(name_re_ja, line) or re.match(name_re_en, line)
+        
+        if author_match or name_only_match:
             
-            # 氏名のクリーンアップ (全角・半角スペースを削除)
-            detected_author = re.sub(r"[\s　]", "", detected_author)
-            
-            # 所属機関が続くかチェック
-            if re.search(org_keywords_re, line, re.IGNORECASE) or \
-               (i + 1 < len(header_lines) and re.search(org_keywords_re, header_lines[i+1], re.IGNORECASE)):
+            # 著者名の決定
+            if author_match:
+                detected_author = author_match.group(1).strip()
+            elif name_only_match:
+                # 所属機関が続くかチェックし、続く場合のみ著者と見なす
+                if re.search(org_keywords_re, line, re.IGNORECASE) or \
+                   (i + 1 < len(header_lines) and re.search(org_keywords_re, header_lines[i+1], re.IGNORECASE)):
+                    detected_author = name_only_match.group(1).strip()
                 
-                st.info(f"→ 構造的著者情報（{detected_author}）検出 (+10点, 現在{score_author_doc}点)")
-                score_author_doc = max(score_author_doc, 10) # 少なくとも10点以上を保証
-                break # 検出したらループを抜ける
+            if detected_author:
+                # 氏名のクリーンアップ (全角・半角スペースを削除)
+                detected_author = re.sub(r"[\s　]", "", detected_author)
+                
+                # 検出された行の上（タイトル候補）からタイトルを探索
+                if i > 0:
+                    # 著者行の直前の行をタイトル候補とする
+                    candidate_title_line = header_lines[i-1].strip()
+                    
+                    # 候補行がジャーナル情報や短い行ではないかを確認
+                    if len(candidate_title_line) > 10 and not re.search(r"Vol\.\s*\d+|Journal|ISSN|doi", candidate_title_line, re.IGNORECASE):
+                        extracted_title_candidate = candidate_title_line
+                
+                # 著者名が確認された時点で、スコアを加算し、探索を終了
+                score_author_doc = max(score_author_doc, 10) 
+                st.info(f"→ 構造的著者情報（{detected_author}）とタイトル候補を検出 (+10点, 現在{score_author_doc}点)")
+                break 
 
     # 著者情報が検出された場合、スコアを確定させる
     if detected_author: 
         score_author_doc = max(score_author_doc, 10) # 少なくとも10点以上を保証
-        
-    year_match = re.search(r"(\d{4})", first_10_lines)
-    
-    if year_match and score_author_doc > 0:
-        score_author_doc += 3 # 年号が検出され、かつ著者付き文書の可能性が高い場合
-        st.info(f"→ ヘッダーで年号パターン検出 (+3点, 現在{score_author_doc}点)")
         
     # ------------------------------------------------------------------
     # 3. 最終判定ロジック
@@ -319,50 +336,45 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     
     reasoning_detail = f"（著者文書スコア: {score_author_doc}, 請求書スコア: {score_invoice}）"
     
-    # 論文/著者付き文書と判定
+    # 著者付き文書と判定
     if score_author_doc >= 10 and score_author_doc > score_invoice:
         st.success(f"✅ **最終判定**: 著者付き文書（論文/レポート）と決定しました。")
         
         # 抽出ロジック（著者付き文書）
         author = detected_author if detected_author else "著者名不明"
         
-        # タイトル抽出ロジックの改善
+        # タイトル確定ロジック
         title_extracted = os.path.splitext(uploaded_file.name)[0] # 初期値はファイル名
         
-        if len(text_lines) > 0:
-            top_lines = text_lines[0:5] # 最初の5行を対象
-            
-            clean_lines = []
-            author_line_index = -1
-            
-            # 著者やジャーナル行を特定
-            for idx, line in enumerate(top_lines):
-                # 著作権/ジャーナル名っぽい行や非常に短い行をスキップ
-                if len(line) < 10 or re.search(r"Vol\.\s*\d+|No\.\s*\d+|pp\.\s*\d+|Journal", line, re.IGNORECASE):
-                    continue
-                # 検出された著者名が含まれる行もスキップ
-                if detected_author and detected_author in re.sub(r"[\s　]", "", line):
-                    author_line_index = idx # 著者行を記録
-                    continue
-                
-                # 「抄録:」や「Abstract:」で始まる行もスキップ（タイトルではないため）
-                if re.search(r"^(抄録|Abstract|Keywords):", line, re.IGNORECASE):
-                    continue
-
-                clean_lines.append(line)
-
-            if clean_lines:
-                # 最初の2行をタイトル候補とする（タイトルは通常、ヘッダーのすぐ下にある）
-                title_extracted = clean_lines[0]
-                
-                # タイトル候補の行が短い場合、次の行を連結してみる
-                if len(title_extracted) < 20 and len(clean_lines) > 1:
-                     title_extracted = clean_lines[0] + " " + clean_lines[1]
-            
-            # 最終的なクリーンアップ
+        if extracted_title_candidate:
+            # 抽出候補から抄録などのプレフィックスを除去
+            title_extracted = re.sub(r"^(抄録|Abstract|Keywords):[\s　]*", "", extracted_title_candidate, flags=re.IGNORECASE)
             title_extracted = re.sub(r"[\s　]+", " ", title_extracted).strip() # 複数のスペースを1つに
-
         
+        # [NEW LOGIC] タイトル候補がない、または不十分な場合、文書全体を要約して生成
+        if not title_extracted or len(title_extracted) < 15 or '抄録' in title_extracted:
+            st.warning("→ タイトル抽出候補が不十分または不正なため、文書全体から要約タイトルを生成します。")
+            
+            # テキストを単語に分割 (簡易的な形態素解析の代用)
+            words = re.findall(r'[一-龠ァ-ヴーあ-んA-Za-z0-9]+', text_content)
+            
+            # ストップワード (一般的な単語) の定義 (簡易版)
+            stop_words = {'こと', 'の', 'は', 'が', 'を', 'に', 'と', 'て', 'で', 'ます', 'です', 'ある', 'いる', 'する', 'なる', '本稿', '本研究'}
+            
+            # 頻度を計算
+            word_counts = {}
+            for word in words:
+                if len(word) > 1 and word not in stop_words:
+                    word_counts[word] = word_counts.get(word, 0) + 1
+            
+            # 頻度の高い上位5単語を抽出
+            sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+            
+            if sorted_words:
+                top_keywords = [word for word, count in sorted_words]
+                title_extracted = "要約タイトル: " + "・".join(top_keywords)
+                st.info(f"→ 要約生成タイトル: {title_extracted}")
+            
         data = AuthorData( 
             author=author,
             title=title_extracted 
@@ -370,7 +382,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="論文", # 要件定義書の分類カテゴリは「論文」を維持
             extracted_data=data,
-            reasoning=f"高度なパターンマッチングにより、著者情報（氏名と所属の組み合わせ）とキーワードを検出（{score_author_doc}点）。著者付き文書と判定しました。",
+            reasoning=f"高度なパターンマッチングにより、著者情報（氏名と所属の組み合わせ）を検出（{score_author_doc}点）。著者付き文書と判定し、タイトルは内容の要約に基づき生成しました。",
         )
 
     # 請求書と判定
@@ -398,14 +410,32 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     # 4. その他/不明
     if text_content.strip():
         st.warning("⚠️ **最終判定**: 特定の文書パターンに一致しませんでした。")
-        # テキストがあれば「その他」としてファイル名をタイトルとして提案
+        # テキストがあれば「その他」としてファイル名を元に、または要約に基づきタイトルを提案
+        
+        # [NEW LOGIC] その他に分類された場合も要約を試みる
+        words = re.findall(r'[一-龠ァ-ヴーあ-んA-Za-z0-9]+', text_content)
+        stop_words = {'こと', 'の', 'は', 'が', 'を', 'に', 'と', 'て', 'で', 'ます', 'です', 'ある', 'いる', 'する', 'なる', '本稿', '本研究'}
+        word_counts = {}
+        for word in words:
+            if len(word) > 1 and word not in stop_words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+        
+        sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)[:3] # 上位3単語
+        
+        if sorted_words and sorted_words[0][1] > 2: # 最頻出単語が複数回出ている場合のみ要約を採用
+            top_keywords = [word for word, count in sorted_words]
+            title_generated = "要約: " + "・".join(top_keywords)
+            st.info(f"→ 要約生成タイトル: {title_generated}")
+        else:
+            title_generated = os.path.splitext(uploaded_file.name)[0]
+        
         data = OtherData(
-            title=os.path.splitext(uploaded_file.name)[0]
+            title=title_generated
         )
         return AICoreResponse(
             category="その他",
             extracted_data=data,
-            reasoning=f"特定の文書パターン（著者文書、請求書）に一致しませんでした。{reasoning_detail} ファイル名を元にリネームします。"
+            reasoning=f"特定の文書パターン（著者文書、請求書）に一致しませんでした。{reasoning_detail} 内容のキーワード要約に基づきリネームします。"
         )
     else:
         st.error("❌ **最終判定**: ファイル内容が空です。")
@@ -509,7 +539,7 @@ with st.sidebar:
 
 ## メインエリア
 st.title("🤖 AIスマートファイルリネームシステム (Local Mode)")
-st.caption("アップロードされたファイルの内容をローカルのルールで分析し、自動リネームを行います。")
+st.caption("アップロードされたファイルの内容をローカルのルールで分析し、命名ルールに従って自動リネームを行います。")
 
 # ファイルアップロードエリア (要件 3)
 uploaded_files = st.file_uploader(
