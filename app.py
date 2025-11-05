@@ -274,7 +274,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
 
     [全JSON出力ルール]
     1. 応答は必ずJSON形式で、提供されたスキーマに厳密に従ってください。
-    2. 'category' が **"不明"** の場合、**'extracted_data' は必ず null にし、空のオブジェクト `{}` を使用しないでください**。
+    2. 'category' が **"不明"** の場合、**'extracted_data' は必ず null にし、空のオブジェクト {{}} を使用しないでください**。
     3. JSON以外の追加のテキストは一切含めないでください。
     """
     
