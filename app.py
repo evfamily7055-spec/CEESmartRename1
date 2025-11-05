@@ -4,7 +4,7 @@ import os
 import io
 import csv # CSV処理ライブラリ
 import time # ファイルアップロード後の待機用
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, ConfigDict # ConfigDictをインポート
 from typing import Optional, Literal, Dict, Any, List, Union # Unionを追加
 
 # 外部ライブラリ
@@ -43,6 +43,9 @@ class OtherData(BaseModel):
 Category = Literal["論文", "請求書・領収書", "その他", "不明"]
 
 class AICoreResponse(BaseModel):
+    # 修正点: ConfigDict を使用して余分な入力を無視する設定を追加
+    model_config = ConfigDict(extra='ignore')
+
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
     # extracted_data の型を具体的な Pydantic モデルのユニオンに変更
     # Union[..., Dict] の形式にすることで、厳密な検証が失敗した場合に辞書として受け入れることを試みる（エラー耐性の向上）
@@ -321,7 +324,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
                 response_mime_type="application/json",
                 # Pydantic スキーマを直接渡す
                 response_schema=response_schema, 
-                timeout=120  
+                # 修正: 'timeout=120' を削除
             )
         )
         
