@@ -22,11 +22,11 @@ from pptx import Presentation # PPTX処理ライブラリ (python-pptx)
 # 1. データ構造の定義 (Pydanticで継続)
 # ----------------------------------------------------------------------
 
-# 論文データ
-class PaperData(BaseModel):
-    year: str = Field(description="出版年西暦 (例: 2024)")
+# 論文データ => 著者付き文書データに名称変更
+class AuthorData(BaseModel):
+    # year: str = Field(description="出版年西暦 (例: 2024)") # 年号は必須ではないためロジックでのみ利用
     author: str = Field(description="主要著者名。カンマ区切りで記述してください。")
-    title: str = Field(description="論文のタイトル。")
+    title: str = Field(description="文書のタイトル。")
 
 # 請求書・領収書データ
 class InvoiceData(BaseModel):
@@ -47,7 +47,8 @@ class AICoreResponse(BaseModel):
     model_config = ConfigDict(extra='ignore')
 
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
-    extracted_data: Optional[Union[PaperData, InvoiceData, OtherData, Dict[str, Any]]] = Field( 
+    # AuthorData (旧 PaperData) を使用
+    extracted_data: Optional[Union[AuthorData, InvoiceData, OtherData, Dict[str, Any]]] = Field( 
         None, 
         description="分類に応じた抽出データを含むオブジェクト。不明の場合は null にしてください。"
     )
@@ -236,7 +237,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     
     # スコアリング基準
     score_invoice = 0
-    score_paper = 0
+    score_author_doc = 0 # 論文/著者付き文書のスコア
     
     # ------------------------------------------------------------------
     # 1. 請求書/領収書 ルール (スコアベース)
@@ -258,61 +259,63 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         st.info(f"→ ヘッダーで金額パターン検出 (+5点, 現在{score_invoice}点)")
     
     # ------------------------------------------------------------------
-    # 2. 論文 ルール (スコアベース)
+    # 2. 著者付き文書 ルール (スコアベース)
     # ------------------------------------------------------------------
     
-    paper_keywords = [
-        "abstract", "introduction", "author", "year of publication", # 英語
-        "抄録", "緒言", "序論", "著者", "発表年", "論文", "研究報告", "キーワード" # 日本語
+    author_doc_keywords = [
+        "abstract", "introduction", "author", "year of publication", # 論文キーワード
+        "抄録", "緒言", "序論", "著者", "発表年", "研究報告", "キーワード", # 論文キーワード
+        "レポート", "Report", "技術資料", "作成者", "執筆者" # 一般的な著者付き文書キーワードを追加
     ]
-    if any(keyword in lower_text for keyword in paper_keywords):
-        score_paper += 5
-        st.info(f"→ 論文キーワード検出 ({score_paper}点)")
+    if any(keyword in lower_text for keyword in author_doc_keywords):
+        score_author_doc += 5
+        st.info(f"→ 著者付き文書キーワード検出 ({score_author_doc}点)")
     
     # ヘッダーに著者名（氏名＋機関名）のパターンがあるか
-    # 強化: 著者名のパターンは Title/Author/Abstract のすぐ後にあることが多い
-    author_pattern = re.search(r"(?:Author|著者)\s*[:]?\s*([A-Z][a-z]+(?:\s*[A-Z][a-z]+)?)\s*\((.+?)\)", first_10_lines)
+    # 著者名検出のパターンを「Author/著者/作成者」に拡大
+    author_pattern = re.search(r"(?:Author|著者|作成者|執筆者)\s*[:]?\s*([A-Z][a-z]+(?:\s*[A-Z][a-z]+)?)\s*(?:\((.+?)\))?", first_10_lines)
     
-    # 年号と著者名がヘッダーにあるか
-    year_match_paper = re.search(r"(\d{4})", first_10_lines)
+    # 年号は必須ではないが、あれば加点材料とする
+    year_match = re.search(r"(\d{4})", first_10_lines)
+    
     if author_pattern:
-        score_paper += 10 # 構造的な著者情報検出
-        st.info(f"→ 構造的著者情報（氏名と所属）検出 (+10点, 現在{score_paper}点)")
-    if year_match_paper and score_paper > 0:
-        score_paper += 3 # 年号が検出され、かつ論文の可能性が高い場合
-        st.info(f"→ ヘッダーで年号パターン検出 (+3点, 現在{score_paper}点)")
+        score_author_doc += 10 # 構造的な著者情報検出
+        st.info(f"→ 構造的著者情報（氏名パターン）検出 (+10点, 現在{score_author_doc}点)")
+    
+    if year_match and score_author_doc > 0:
+        score_author_doc += 3 # 年号が検出され、かつ著者付き文書の可能性が高い場合
+        st.info(f"→ ヘッダーで年号パターン検出 (+3点, 現在{score_author_doc}点)")
         
     # ------------------------------------------------------------------
     # 3. 最終判定ロジック
     # ------------------------------------------------------------------
     
-    reasoning_detail = f"（論文スコア: {score_paper}, 請求書スコア: {score_invoice}）"
+    reasoning_detail = f"（著者文書スコア: {score_author_doc}, 請求書スコア: {score_invoice}）"
     
-    # 論文と判定
-    if score_paper >= 10 and score_paper > score_invoice:
-        st.success(f"✅ **最終判定**: 論文と決定しました。")
+    # 論文/著者付き文書と判定
+    if score_author_doc >= 10 and score_author_doc > score_invoice:
+        st.success(f"✅ **最終判定**: 著者付き文書（論文/レポート）と決定しました。")
         
-        # 抽出ロジック（論文）
-        year = year_match_paper.group(1) if year_match_paper else "YYYY"
+        # 抽出ロジック（著者付き文書）
         author = author_pattern.group(1).strip() if author_pattern else "著者名不明"
         
         # タイトルはテキストの最初の非空白行とする (最も確実)
         title_lines = [line for line in text_content.split('\n') if line.strip()]
         title_extracted = title_lines[0].strip() if title_lines else os.path.splitext(uploaded_file.name)[0]
         
-        data = PaperData(
-            year=year,
+        data = AuthorData( # AuthorDataを使用
             author=author,
             title=title_extracted 
         )
+        # Yearはリネーム形式から削除したため、抽出データには含めない
         return AICoreResponse(
-            category="論文",
+            category="論文", # 要件定義書の分類カテゴリは「論文」を維持
             extracted_data=data,
-            reasoning=f"高度なパターンマッチングにより、著者情報、発行年、論文キーワードを検出（{score_paper}点）。論文と判定しました。{reasoning_detail}",
+            reasoning=f"高度なパターンマッチングにより、著者情報（氏名パターン）、キーワードを検出（{score_author_doc}点）。著者付き文書と判定しました。{reasoning_detail}",
         )
 
     # 請求書と判定
-    elif score_invoice >= 10 and score_invoice >= score_paper:
+    elif score_invoice >= 10 and score_invoice >= score_author_doc:
         st.success(f"✅ **最終判定**: 請求書/領収書と決定しました。")
 
         # 抽出ロジック（請求書）
@@ -343,7 +346,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="その他",
             extracted_data=data,
-            reasoning=f"特定の文書パターン（論文、請求書）に一致しませんでした。{reasoning_detail} ファイル名を元にリネームします。"
+            reasoning=f"特定の文書パターン（著者文書、請求書）に一致しませんでした。{reasoning_detail} ファイル名を元にリネームします。"
         )
     else:
         st.error("❌ **最終判定**: ファイル内容が空です。")
@@ -377,17 +380,22 @@ def apply_rename_rule(ai_response: AICoreResponse, original_name: str) -> str:
         st.warning("⚠️ カテゴリが「不明」のため、リネーム処理はスキップされました。")
         return original_name
 
-    # 1. 論文 (要件 6.1)
+    # 1. 論文 (要件 6.1) -> 著者付き文書としてリネーム (年号なし)
     elif category == "論文":
-        year = data.get("year", "YYYY")
+        # year = data.get("year", "YYYY") # 年号は使用しない
         authors = data.get("author", "著者名不明")
         title = data.get("title", "タイトル不明")
 
         authors_short = authors[:15] if len(authors) > 15 else authors
-        max_title_len = 50 - len(year) - len(authors_short) - 2
+        # 最大50字の制限は著者名とタイトルで適用
+        max_total_len = 50 - 1 # 1は区切り文字 '_' の数
+        
+        # 著者を15字に制限後、残りの文字をタイトルに割り当てる
+        max_title_len = max_total_len - len(authors_short)
         title_short = title[:max(0, max_title_len)]
 
-        new_name_raw = f"{year}_{authors_short}_{title_short}"
+        # 命名規則: 著者名_タイトル
+        new_name_raw = f"{authors_short}_{title_short}".strip('_')
         return f"{sanitize_filename(new_name_raw)}{ext}"
 
     # 2. 請求書・領収書 (要件 6.2)
