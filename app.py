@@ -224,64 +224,97 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
 
     # 文書ファイルの内容分析 (ルールベース)
     lower_text = text_content.lower()
+    first_10_lines = '\n'.join(text_content.split('\n')[:10]).strip() # 先頭10行を分析
     
-    # 1. 請求書/領収書 ルール
-    if "請求書" in lower_text or "領収書" in lower_text or "invoice" in lower_text or "receipt" in lower_text:
-        st.info("🔎 ローカルAI: 請求書/領収書パターンを検出。")
-        
-        # 抽出ロジックの簡略化 (正規表現で主要項目を抽出)
-        # 日付パターンを強化 (例: 2024年1月1日 や 2024/01/01 や 2024-01-01 に対応)
-        date_match = re.search(r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)", text_content)
-        # 金額パターンを強化 (カンマ区切りや全角/半角記号に対応)
-        amount_match = re.search(r"([¥￥$€£]\s*[\d,]+\.?\d*|[\d,]+\s*(円|yen))", text_content)
-        
-        if date_match and amount_match:
-            data = InvoiceData(
-                # 日付を YYYY-MM-DD 形式に整形（年/月/日をハイフンに変換）
-                invoice_date=date_match.group(1).replace('年', '-').replace('月', '-').replace('日', ''),
-                invoice_amount=amount_match.group(0),
-                invoice_issuer="不明な発行元", 
-                invoice_subject=uploaded_file.name 
-            )
-            return AICoreResponse(
-                category="請求書・領収書",
-                extracted_data=data,
-                reasoning="ローカルパターンマッチングにより日付と金額を検出しました。"
-            )
-
-    # 2. 論文 ルール (キーワードを大幅に強化)
+    # スコアリング基準
+    score_invoice = 0
+    score_paper = 0
+    
+    # ------------------------------------------------------------------
+    # 1. 請求書/領収書 ルール (スコアベース)
+    # ------------------------------------------------------------------
+    
+    invoice_keywords = ["請求書", "領収書", "明細", "invoice", "receipt", "合計金額", "御中"]
+    if any(keyword in lower_text for keyword in invoice_keywords):
+        score_invoice += 5
+    
+    date_match = re.search(r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)", first_10_lines)
+    amount_match = re.search(r"([¥￥$€£]\s*[\d,]+\.?\d*|[\d,]+\s*(円|yen))", first_10_lines)
+    
+    if date_match:
+        score_invoice += 5 # 日付検出
+    if amount_match:
+        score_invoice += 5 # 金額検出
+    
+    # ------------------------------------------------------------------
+    # 2. 論文 ルール (スコアベース)
+    # ------------------------------------------------------------------
+    
     paper_keywords = [
         "abstract", "introduction", "author", "year of publication", # 英語
-        "抄録", "緒言", "序論", "著者", "発表年", "論文", "研究報告" # 日本語
+        "抄録", "緒言", "序論", "著者", "発表年", "論文", "研究報告", "キーワード" # 日本語
     ]
     if any(keyword in lower_text for keyword in paper_keywords):
-        st.info("🔎 ローカルAI: 論文パターンを検出。")
+        score_paper += 5
+    
+    # ヘッダーに著者名（氏名＋機関名）のパターンがあるか
+    author_pattern = re.search(r"(?:Author|著者)\s*[:]?\s*([A-Z][a-z]+(?:\s*[A-Z][a-z]+)?)\s*\((.+?)\)", first_10_lines)
+    
+    # 年号と著者名がヘッダーにあるか
+    year_match_paper = re.search(r"(\d{4})", first_10_lines)
+    if author_pattern:
+        score_paper += 10 # 構造的な著者情報検出
+    if year_match_paper and score_paper > 0:
+        score_paper += 3 # 年号が検出され、かつ論文の可能性が高い場合
+        
+    # ------------------------------------------------------------------
+    # 3. 最終判定ロジック
+    # ------------------------------------------------------------------
+    
+    if score_paper >= 10 and score_paper > score_invoice:
+        st.success(f"✅ ローカルAI: 論文と判定 (スコア: {score_paper})")
+        
+        # 抽出ロジック（論文）
+        year = year_match_paper.group(1) if year_match_paper else "YYYY"
+        author = author_pattern.group(1).strip() if author_pattern else "著者名不明"
+        
+        # タイトルはテキストの最初の非空白行とする (最も確実)
+        title_lines = [line for line in text_content.split('\n') if line.strip()]
+        title_extracted = title_lines[0].strip() if title_lines else os.path.splitext(uploaded_file.name)[0]
+        
+        data = PaperData(
+            year=year,
+            author=author,
+            title=title_extracted 
+        )
+        return AICoreResponse(
+            category="論文",
+            extracted_data=data,
+            reasoning=f"高度なパターンマッチング (スコア {score_paper}) により、著者、発行年、キーワードを検出しました。"
+        )
 
-        # 抽出ロジックの簡略化
-        year_match = re.search(r"(?:Year|Date|Published|発行年|発表年):?\s*(\d{4})", text_content, re.IGNORECASE)
-        # 著者名の検出を強化 (日本語の可能性も考慮)
-        author_match = re.search(r"(?:Author|著者):?\s*([A-Za-z\s.,\u3005\u4e00-\u9faf\u3040-\u309f\u30a0-\u30ff]+)", text_content)
-        # タイトルも検出を試みる
-        title_match = re.search(r"(?:Title|題名):?\s*([^\n]+)", text_content)
+    elif score_invoice >= 10 and score_invoice >= score_paper:
+        st.success(f"✅ ローカルAI: 請求書/領収書と判定 (スコア: {score_invoice})")
 
+        # 抽出ロジック（請求書）
+        invoice_date_raw = date_match.group(1) if date_match else "YYYYMMDD"
+        invoice_date = invoice_date_raw.replace('年', '-').replace('月', '-').replace('日', '')
+        
+        amount_extracted = amount_match.group(0) if amount_match else "0"
+        
+        data = InvoiceData(
+            invoice_date=invoice_date,
+            invoice_amount=amount_extracted,
+            invoice_issuer="不明な発行元", 
+            invoice_subject=uploaded_file.name
+        )
+        return AICoreResponse(
+            category="請求書・領収書",
+            extracted_data=data,
+            reasoning=f"高度なパターンマッチング (スコア {score_invoice}) により、請求キーワード、日付、金額を検出しました。"
+        )
 
-        if year_match and author_match:
-            
-            # タイトルが見つからない場合はファイル名を使用
-            title_extracted = title_match.group(1).strip() if title_match else os.path.splitext(uploaded_file.name)[0]
-            
-            data = PaperData(
-                year=year_match.group(1),
-                author=author_match.group(1).strip(),
-                title=title_extracted 
-            )
-            return AICoreResponse(
-                category="論文",
-                extracted_data=data,
-                reasoning="ローカルパターンマッチングにより著者と発行年を検出しました。"
-            )
-
-    # 3. その他/不明
+    # 4. その他/不明
     if text_content.strip():
         # テキストがあれば「その他」としてファイル名をタイトルとして提案
         data = OtherData(
@@ -290,7 +323,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         return AICoreResponse(
             category="その他",
             extracted_data=data,
-            reasoning="特定の文書パターンに一致しなかったため、ファイル名を元にリネームします。"
+            reasoning=f"特定の文書パターンに一致しませんでした (論文スコア: {score_paper}, 請求書スコア: {score_invoice})。ファイル名を元にリネームします。"
         )
     else:
         # テキストが空の場合
