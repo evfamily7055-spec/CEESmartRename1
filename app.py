@@ -347,10 +347,13 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
         # Pydantic の厳密な検証 (Union型を含む) に失敗した場合
         
         # 修正点: エラー詳細を安全に文字列化し、st.errorで表示
-        error_details_str = str(e.errors()[:3]) # 最初の3つのエラーのみ取得し文字列化
+        # Pydanticエラーリストを標準の辞書/リストのリストに変換
+        error_list = e.errors()
+        safe_error_details = json.loads(json.dumps(error_list[:3], default=str)) # JSONシリアライズ可能な形に変換
 
         st.error(f"❌ 構造化データ検証失敗: LLMの出力が要求スキーマに一致しません。")
-        st.markdown(f"**検証エラー詳細 (一部):** `{error_details_str}`")
+        st.markdown(f"**検証エラー詳細 (一部):**")
+        st.json(safe_error_details)
         st.text(f"生の応答テキスト先頭: {response_text[:500]}")
         
         return AICoreResponse(category="不明", extracted_data=None, reasoning=f"AI応答がAICoreResponseスキーマ検証に失敗しました。詳細をStreamlit UIで確認してください。")
