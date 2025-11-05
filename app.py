@@ -329,7 +329,20 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
             )
         )
         
-        response_json = json.loads(response.text)
+        # --- 修正箇所: JSONパース前に応答テキストをクリーンアップ ---
+        response_text = response.text.strip()
+        # 応答の前後から ```json や ``` を取り除く
+        if response_text.startswith("```json"):
+            response_text = response_text[7:].strip()
+        if response_text.endswith("```"):
+            response_text = response_text[:-3].strip()
+        
+        # 空の応答チェックを追加
+        if not response_text:
+            raise json.JSONDecodeError("Received empty response text.", "response.text", 0)
+
+        response_json = json.loads(response_text)
+        # --------------------------------------------------------
         
         # 1. 応答の基本構造 (category, reasoningなど) を検証
         base_validated_response = AICoreResponse.model_validate(response_json)
