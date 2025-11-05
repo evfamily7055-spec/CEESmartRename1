@@ -44,28 +44,27 @@ Category = Literal["論文", "請求書・領収書", "その他", "不明"]
 
 class AICoreResponse(BaseModel):
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
-    # extracted_dataは、LLMが出力する生のJSONオブジェクトを格納するため、Dict[str, Any]として定義
     extracted_data: Optional[Dict[str, Any]] = Field(
         None, 
         description="分類に応じた抽出データを含むオブジェクト。不明の場合は空のオブジェクト {} にしてください。オブジェクトのスキーマは category フィールドの値によって決定されます。"
     )
     reasoning: str = Field(description="LLMがその分類と抽出を行った根拠。")
-    # 文字起こし結果を追加 (音声ファイルの場合のみ使用)
     transcript: Optional[str] = Field(None, description="音声ファイルが入力された場合の文字起こし結果。")
 
 # pydanticスキーマからGemini API用のJSONスキーマを生成するヘルパー関数
 def get_json_schema_for_gemini():
-    # 構造化された応答に必要なプロパティのみを定義
+    schema = AICoreResponse.model_json_schema()
+    
     return {
         "type": "object",
         "properties": {
-            "category": AICoreResponse.model_json_schema()["properties"]["category"],
+            "category": schema["properties"]["category"],
             "extracted_data": {
                 "type": "object",
                 "description": "分類に応じてPaperData, InvoiceData, OtherDataのいずれかのスキーマに従うオブジェクト。",
             },
-            "reasoning": AICoreResponse.model_json_schema()["properties"]["reasoning"],
-            "transcript": AICoreResponse.model_json_schema()["properties"]["transcript"]
+            "reasoning": schema["properties"]["reasoning"],
+            "transcript": schema["properties"]["transcript"]
         },
         "required": ["category", "reasoning"]
     }
@@ -88,22 +87,25 @@ def extract_text(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -
 
     # --- 音声ファイル処理 (フラグを返す) ---
     if file_ext in ['mp3', 'wav', 'm4a']:
-        # 音声ファイルの場合、テキスト抽出はAIに任せるため、フラグのみを返す
         st.info(f"🔊 音声ファイル ({uploaded_file.name}): ファイルをGemini APIに直接送信します。")
-        return uploaded_file.name, True # プレースホルダーのテキストとASRフラグを返す
+        return uploaded_file.name, True 
 
-    # --- PDF 処理 ---
+    # --- PDF 処理 (安定性強化) ---
     if file_ext == 'pdf':
         try:
             st.info(f"📄 PDFファイル ({uploaded_file.name}): テキスト抽出を実行中...")
             pdf_reader = pypdf.PdfReader(uploaded_file)
             text_content = ""
             for page in pdf_reader.pages:
-                text_content += page.extract_text() or ""
+                # 抽出時にエラーが発生する可能性を考慮し、try/exceptを追加
+                try:
+                    text_content += page.extract_text() or ""
+                except (TypeError, ValueError) as e:
+                    st.warning(f"⚠️ ページ抽出エラー: {e}")
+                    continue
                 
             if not text_content.strip():
                 st.warning("⚠️ PDFからテキストが抽出できませんでした。スキャン画像と見なしてモックOCRテキストを使用します。")
-                # 実際のOCRではなく、Gemini APIのVision機能を使うべきだが、ここではテキストベースのフォールバックで代用
                 text_content = "OCR結果: このファイルは2024年4月1日に発行された領収書であり、金額は25,000円です。発行元はABCコンサルティングです。"
             
             return text_content, False
@@ -119,10 +121,10 @@ def extract_text(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -
             document = docx.Document(io.BytesIO(uploaded_file.getvalue()))
             text_content = ""
             for paragraph in document.paragraphs:
-                text_content += paragraph.text + '\n' # パラグラフごとに改行
+                text_content += paragraph.text + '\n' 
                 
             if not text_content.strip():
-                st.warning("⚠️ DOCXからテキストが抽出できませんでした。")
+                st.warning("⚠️ DOCXからテキストが抽出できませんでした。ファイル内容が空か、読み取りに失敗しました。")
             
             return text_content, False
 
@@ -158,7 +160,7 @@ def extract_text(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -
             st.error(f"🚨 XLSX処理エラー: {e}")
             return f"XLSX処理中にエラーが発生しました: {e}", False
 
-    # --- PPTX 処理 ---
+    # --- PPTX 処理 (安定性強化) ---
     elif file_ext == 'pptx':
         try:
             st.info(f"🖼️ PPTXファイル ({uploaded_file.name}): テキスト抽出を実行中...")
@@ -168,13 +170,19 @@ def extract_text(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -
             for i, slide in enumerate(presentation.slides):
                 text_content += f"\n--- スライド {i+1} ---\n"
                 for shape in slide.shapes:
-                    if hasattr(shape, "text"):
+                    if hasattr(shape, "text_frame") and shape.text_frame: # テキストフレームの存在チェック
                         text_content += shape.text + '\n'
                     elif shape.has_table:
+                        # テーブルセル内のテキストをより確実に取得
                         for row in shape.table.rows:
-                            row_data = [cell.text for cell in row.cells]
+                            row_data = []
+                            for cell in row.cells:
+                                if cell.text_frame:
+                                    row_data.append(cell.text)
                             text_content += ' | '.join(row_data) + '\n'
-            
+                    elif shape.has_text_frame: # has_text_frameはtext_frameの有無をチェック
+                        text_content += shape.text_frame.text + '\n'
+
             if not text_content.strip():
                 st.warning("⚠️ PPTXからテキストが抽出できませんでした。")
 
@@ -203,8 +211,7 @@ def extract_text(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -
         except Exception as e:
             st.error(f"🚨 CSV処理エラー: {e}")
             return f"CSV処理中にエラーが発生しました: {e}", False
-
-
+            
 # 🚨 モック応答関数（APIキー未入力時に使用）
 def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploaded_file_manager.UploadedFile, is_asr: bool) -> AICoreResponse:
     """
@@ -226,6 +233,10 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
             transcript=transcript
         )
 
+    # 文書ファイルのモック応答 (文書の内容がエラーでないか確認)
+    if "処理中にエラーが発生しました" in text_content:
+        return AICoreResponse(category="不明", extracted_data={}, reasoning="ファイル処理中にエラーが発生し、内容を取得できませんでした。")
+    
     # 文書ファイルのモック応答 (以前と同じロジック)
     if "請求書" in text_content or "Google株式会社" in text_content or "領収書" in text_content:
         data = InvoiceData(
@@ -239,7 +250,6 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
             extracted_data=data,
             reasoning="請求書に関するキーワードと金額情報が含まれていたため。"
         )
-    # ... (論文、その他のモックロジックは省略)
     elif "論文" in text_content or "Impact of AI" in text_content or "著者" in text_content:
         data = PaperData(
             year="2025",
@@ -287,12 +297,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     if is_asr:
         st.info("⬆️ 音声ファイルをGemini APIにアップロードし、文字起こしと分析を同時に行います。")
         
-        # 1. ファイルをアップロード
-        # 注意: 認証済みクライアントが必要です
         try:
-            # BytesIOから直接アップロードするために、一旦ファイルとして書き出す必要がありますが、
-            # Streamlitの環境で安全に行うため、getvalue()でBytesIOオブジェクトを渡し、
-            # SDKに処理を委ねます。
             uploaded_file_gemini = client.files.upload(
                 file=uploaded_file.getvalue(), 
                 mime_type=uploaded_file.type
@@ -301,7 +306,6 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
             st.error(f"🚨 ファイルアップロードエラー: {e}")
             return AICoreResponse(category="不明", extracted_data={}, reasoning=f"音声ファイルのアップロードに失敗: {e}")
 
-        # 2. プロンプトとファイルリソースを設定
         parts.append(uploaded_file_gemini)
         parts.append(f"この音声ファイルの内容を文字起こしし、その結果に基づき、内容を分析して以下の構造化データ形式で抽出してください。")
         
@@ -318,15 +322,11 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=get_json_schema_for_gemini(),
-                # Note: 音声ファイルの処理には時間がかかるため、タイムアウトを長く設定することが推奨されます
                 timeout=120  
             )
         )
         
-        # 応答テキストをパース
         response_json = json.loads(response.text)
-        
-        # pydanticで検証
         validated_response = AICoreResponse.model_validate(response_json)
         return validated_response
 
@@ -339,12 +339,14 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     except ValidationError as e:
         st.error(f"❌ 構造化データ検証エラー: Geminiの出力がスキーマに一致しませんでした。{e}")
         return AICoreResponse(category="不明", extracted_data={}, reasoning="API応答がPydanticスキーマ検証に失敗しました。")
+    except Exception as e:
+        st.error(f"❌ 予期せぬエラーが発生しました: {e}")
+        return AICoreResponse(category="不明", extracted_data={}, reasoning=f"予期せぬエラー: {e}")
     finally:
         # 3. アップロードしたファイルを削除 (リソースの節約とセキュリティのため)
         if is_asr and 'uploaded_file_gemini' in locals():
              st.info("⬇️ アップロードした一時ファイルを削除しています。")
              client.files.delete(name=uploaded_file_gemini.name)
-             # タイムアウトを回避するために少し待つ
              time.sleep(1)
 
 
@@ -429,7 +431,7 @@ with st.sidebar:
             st.success("APIキーが設定されました。Gemini APIを使用して分析します。")
         except Exception as e:
              st.error(f"APIキーが無効です: {e}")
-             api_key = None # クライアント初期化失敗時はキーを無効化
+             api_key = None 
     
     if not api_key:
         st.warning("APIキーが未設定です。デモのためモック応答で処理を実行します。")
@@ -461,10 +463,9 @@ if uploaded_files:
         
         progress_bar = st.progress(0)
         
-        with st.empty(): # 処理状況メッセージ表示用
+        with st.empty(): 
             for i, uploaded_file in enumerate(uploaded_files):
                 
-                # 処理の進捗を更新
                 progress_bar.progress((i + 1) / len(uploaded_files))
                 st.info(f"👉 **{uploaded_file.name}** の処理を開始...")
                 
@@ -484,10 +485,10 @@ if uploaded_files:
                 ai_response = None
                 
                 if client:
-                    # 実際のAPI呼び出し (音声/文書の判定ロジックを含む)
+                    # 実際のAPI呼び出し
                     ai_response = get_ai_core_response(client, text_content, uploaded_file, is_asr)
                 else:
-                    # モック呼び出し (音声/文書の判定ロジックを含む)
+                    # モック呼び出し
                     st.warning("⚠️ APIキーがないため、モック応答を使用します。")
                     ai_response = get_ai_core_response_mock(text_content, uploaded_file, is_asr)
                 
@@ -511,19 +512,16 @@ if uploaded_files:
                 col1, col2, col3 = st.columns([1, 1, 2])
                 
                 with col1:
-                    # リネーム済みファイルのダウンロードボタン (要件 3)
                     st.download_button(
                         label=f"💾 {new_filename} をダウンロード",
-                        data=uploaded_file.getvalue(), # オリジナルファイルの内容を代用
+                        data=uploaded_file.getvalue(), 
                         file_name=new_filename,
                         mime=uploaded_file.type,
                         key=f"download_renamed_{uploaded_file.name}"
                     )
 
-                # is_asrフラグがTrue、またはAPI応答に文字起こしテキストが含まれる場合
                 if is_asr and ai_response.transcript:
                     with col2:
-                        # 文字起こしテキストのダウンロードオプション (要件 4)
                         asr_file_name = f"{os.path.splitext(uploaded_file.name)[0]}.txt"
                         st.download_button(
                             label=f"📝 {asr_file_name} ダウンロード",
@@ -536,16 +534,12 @@ if uploaded_files:
                 with col3:
                     st.caption(f"分類: **{ai_response.category}** | 理由: {ai_response.reasoning}")
 
-            # 処理完了メッセージを表示
             st.success("✅ 全ファイルの処理が完了しました！")
 
-        # 最終的な処理結果の表形式での表示 (要件 3)
         st.dataframe(results, use_container_width=True)
         
         st.markdown("---")
         st.subheader("💡 最終AI分析結果 (構造化データ)")
-        # 抽出結果、AI分類カテゴリ、リネーム後のファイル名を表示 (要件 3)
-        # 最後のファイルの結果を表示
         if 'ai_response' in locals() and ai_response:
             st.json(ai_response.model_dump())
         else:
