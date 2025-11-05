@@ -218,6 +218,7 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
 
     # 文書ファイルのモック応答 (文書の内容がエラーでないか確認)
     if "処理中にエラーが発生しました" in text_content:
+        # 修正点: extracted_data=None を維持
         return AICoreResponse(category="不明", extracted_data=None, reasoning="ファイル処理中にエラーが発生し、内容を取得できませんでした。")
     
     # 文書ファイルのモック応答 (以前と同じロジック)
@@ -273,7 +274,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
 
     [全JSON出力ルール]
     1. 応答は必ずJSON形式で、提供されたスキーマに厳密に従ってください。
-    2. 'category' が "不明" の場合、'extracted_data' は必ず null にしてください。
+    2. 'category' が **"不明"** の場合、**'extracted_data' は必ず null にし、空のオブジェクト `{}` を使用しないでください**。
     3. JSON以外の追加のテキストは一切含めないでください。
     """
     
@@ -303,10 +304,9 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     final_response = None
     uploaded_file_gemini = locals().get('uploaded_file_gemini') # finallyブロックのために定義
     
-    # --- 修正箇所: response_text を try ブロック外で初期化 ---
+    # response_text を try ブロック外で初期化
     response_text = ""
-    # --------------------------------------------------------
-
+    
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash-preview-09-2025',
