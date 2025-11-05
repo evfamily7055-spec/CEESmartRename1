@@ -45,7 +45,8 @@ Category = Literal["論文", "請求書・領収書", "その他", "不明"]
 class AICoreResponse(BaseModel):
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
     # extracted_data の型を具体的な Pydantic モデルのユニオンに変更
-    extracted_data: Optional[Union[PaperData, InvoiceData, OtherData]] = Field( 
+    # Union[..., Dict] の形式にすることで、厳密な検証が失敗した場合に辞書として受け入れることを試みる（エラー耐性の向上）
+    extracted_data: Optional[Union[PaperData, InvoiceData, OtherData, Dict[str, Any]]] = Field( 
         None, 
         description="分類に応じた抽出データを含むオブジェクト。不明の場合は null にしてください。このフィールドの構造は category の値に依存します。"
     )
@@ -350,17 +351,24 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     except ValidationError as e:
         # Pydantic の厳密な検証 (Union型を含む) に失敗した場合
         
-        # 修正点: エラー詳細を安全に文字列化し、st.errorで表示
-        # Pydanticエラーリストを標準の辞書/リストのリストに変換
+        # エラー詳細を安全に文字列化し、st.errorで表示
         error_list = e.errors()
-        safe_error_details = json.loads(json.dumps(error_list[:3], default=str)) # JSONシリアライズ可能な形に変換
+        # JSONシリアライズ可能な形に変換（default=strを使用し、複雑な型を文字列にする）
+        safe_error_details = json.loads(json.dumps(error_list[:3], default=str)) 
 
+        # ユーザーに分かりやすいように、エラーの最も重要な部分を抽出
+        first_error = safe_error_details[0] if safe_error_details else {"loc": ["unknown"], "msg": "No detailed error message available."}
+        error_loc = " -> ".join(map(str, first_error.get("loc", [])))
+        error_msg = first_error.get("msg", "Unknown validation error.")
+        
         st.error(f"❌ 構造化データ検証失敗: LLMの出力が要求スキーマに一致しません。")
-        st.markdown(f"**検証エラー詳細 (一部):**")
+        st.markdown(f"**📍 失敗場所:** `{error_loc}`")
+        st.markdown(f"**💬 エラー内容:** `{error_msg}`")
+        st.markdown(f"**詳細な検証エラー (JSON):**")
         st.json(safe_error_details)
         st.text(f"生の応答テキスト先頭: {response_text[:500]}")
         
-        return AICoreResponse(category="不明", extracted_data=None, reasoning=f"AI応答がAICoreResponseスキーマ検証に失敗しました。詳細をStreamlit UIで確認してください。")
+        return AICoreResponse(category="不明", extracted_data=None, reasoning=f"AI応答がAICoreResponseスキーマ検証に失敗しました。フィールド: {error_loc} - 内容: {error_msg}")
     except Exception as e:
         st.error(f"❌ 予期せぬエラーが発生しました: {e}")
         return AICoreResponse(category="不明", extracted_data=None, reasoning=f"予期せぬエラー: {e}")
