@@ -274,8 +274,7 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
 # 実際のAPI連携関数 (マルチモーダル対応)
 def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file: st.runtime.uploaded_file_manager.UploadedFile, is_asr: bool) -> AICoreResponse:
     """
-    Gemini APIを呼び出し、構造化されたJSON応答を取得する。
-    音声ファイルの場合は、ファイルをアップロードしてマルチモーダル処理を行う。
+    Gemini APIを呼び出し、構造化されたJSON応答を取得し、さらに抽出データの内容を検証する。
     """
     system_instruction = f"""
     あなたはファイルの内容を分析し、リネームのための構造化データを抽出するAIです。
@@ -297,6 +296,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     if is_asr:
         st.info("⬆️ 音声ファイルをGemini APIにアップロードし、文字起こしと分析を同時に行います。")
         
+        uploaded_file_gemini = None
         try:
             uploaded_file_gemini = client.files.upload(
                 file=uploaded_file.getvalue(), 
@@ -314,6 +314,9 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
         parts.append(f"以下のファイル内容を分析し、JSON形式で分類・情報抽出を行ってください:\n\n---\n{text_content}\n---")
 
     
+    final_response = None
+    uploaded_file_gemini = locals().get('uploaded_file_gemini') # finallyブロックのために定義
+    
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash-preview-09-2025',
@@ -327,8 +330,36 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
         )
         
         response_json = json.loads(response.text)
-        validated_response = AICoreResponse.model_validate(response_json)
-        return validated_response
+        
+        # 1. 応答の基本構造 (category, reasoningなど) を検証
+        base_validated_response = AICoreResponse.model_validate(response_json)
+        
+        category = base_validated_response.category
+        extracted_data = base_validated_response.extracted_data
+        
+        # 2. extracted_data の中身を category に基づいて再検証 (重点的な修正ポイント)
+        if category == "論文":
+            Validator = PaperData
+        elif category == "請求書・領収書":
+            Validator = InvoiceData
+        elif category == "その他":
+            Validator = OtherData
+        else: # "不明" またはその他の予期せぬカテゴリ
+            Validator = None
+        
+        if Validator and extracted_data:
+            try:
+                # 抽出データのサブクラス検証
+                Validator.model_validate(extracted_data)
+            except ValidationError as e:
+                # 構造化データの内容検証に失敗した場合
+                error_msg = f"LLMの抽出データが {Validator.__name__} スキーマに不適合です。エラー詳細: {e.errors()[:3]} (一部)"
+                st.error(f"❌ 構造化データ内容エラー: {error_msg}")
+                return AICoreResponse(category="不明", extracted_data={}, reasoning=f"AI抽出データの内容検証に失敗: {error_msg}")
+        
+        # すべての検証に成功した場合
+        final_response = base_validated_response
+        return final_response
 
     except APIError as e:
         st.error(f"❌ Gemini APIエラーが発生しました: {e}")
@@ -337,14 +368,15 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
         st.error(f"❌ Geminiからの応答が不正なJSON形式でした。生の応答: {response.text[:200]}...")
         return AICoreResponse(category="不明", extracted_data={}, reasoning="API応答のJSON解析に失敗しました。")
     except ValidationError as e:
-        st.error(f"❌ 構造化データ検証エラー: Geminiの出力がスキーマに一致しませんでした。{e}")
-        return AICoreResponse(category="不明", extracted_data={}, reasoning="API応答がPydanticスキーマ検証に失敗しました。")
+        # 応答の基本構造 (AICoreResponse自体) の検証に失敗した場合
+        st.error(f"❌ 基本構造検証エラー: Geminiの出力がAICoreResponseスキーマに一致しませんでした。{e.errors()[:3]} (一部)")
+        return AICoreResponse(category="不明", extracted_data={}, reasoning="AI応答がAICoreResponseスキーマ検証に失敗しました。")
     except Exception as e:
         st.error(f"❌ 予期せぬエラーが発生しました: {e}")
         return AICoreResponse(category="不明", extracted_data={}, reasoning=f"予期せぬエラー: {e}")
     finally:
         # 3. アップロードしたファイルを削除 (リソースの節約とセキュリティのため)
-        if is_asr and 'uploaded_file_gemini' in locals():
+        if is_asr and uploaded_file_gemini:
              st.info("⬇️ アップロードした一時ファイルを削除しています。")
              client.files.delete(name=uploaded_file_gemini.name)
              time.sleep(1)
