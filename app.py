@@ -230,12 +230,15 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         st.info("🔎 ローカルAI: 請求書/領収書パターンを検出。")
         
         # 抽出ロジックの簡略化 (正規表現で主要項目を抽出)
-        date_match = re.search(r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text_content)
-        amount_match = re.search(r"(¥|￥|\$|€|£)?\s*[\d,]+\.?\d*", text_content)
+        # 日付パターンを強化 (例: 2024年1月1日 や 2024/01/01 や 2024-01-01 に対応)
+        date_match = re.search(r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)", text_content)
+        # 金額パターンを強化 (カンマ区切りや全角/半角記号に対応)
+        amount_match = re.search(r"([¥￥$€£]\s*[\d,]+\.?\d*|[\d,]+\s*(円|yen))", text_content)
         
         if date_match and amount_match:
             data = InvoiceData(
-                invoice_date=date_match.group(1).replace('/', '-'),
+                # 日付を YYYY-MM-DD 形式に整形（年/月/日をハイフンに変換）
+                invoice_date=date_match.group(1).replace('年', '-').replace('月', '-').replace('日', ''),
                 invoice_amount=amount_match.group(0),
                 invoice_issuer="不明な発行元", 
                 invoice_subject=uploaded_file.name 
@@ -246,19 +249,31 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
                 reasoning="ローカルパターンマッチングにより日付と金額を検出しました。"
             )
 
-    # 2. 論文 ルール
-    if any(keyword in lower_text for keyword in ["abstract", "introduction", "author", "year of publication"]):
+    # 2. 論文 ルール (キーワードを大幅に強化)
+    paper_keywords = [
+        "abstract", "introduction", "author", "year of publication", # 英語
+        "抄録", "緒言", "序論", "著者", "発表年", "論文", "研究報告" # 日本語
+    ]
+    if any(keyword in lower_text for keyword in paper_keywords):
         st.info("🔎 ローカルAI: 論文パターンを検出。")
 
         # 抽出ロジックの簡略化
-        year_match = re.search(r"(?:Year|Date|Published):?\s*(\d{4})", text_content, re.IGNORECASE)
-        author_match = re.search(r"(?:Author|著者):?\s*([A-Za-z\s.,]+)", text_content, re.IGNORECASE)
+        year_match = re.search(r"(?:Year|Date|Published|発行年|発表年):?\s*(\d{4})", text_content, re.IGNORECASE)
+        # 著者名の検出を強化 (日本語の可能性も考慮)
+        author_match = re.search(r"(?:Author|著者):?\s*([A-Za-z\s.,\u3005\u4e00-\u9faf\u3040-\u309f\u30a0-\u30ff]+)", text_content)
+        # タイトルも検出を試みる
+        title_match = re.search(r"(?:Title|題名):?\s*([^\n]+)", text_content)
+
 
         if year_match and author_match:
+            
+            # タイトルが見つからない場合はファイル名を使用
+            title_extracted = title_match.group(1).strip() if title_match else os.path.splitext(uploaded_file.name)[0]
+            
             data = PaperData(
                 year=year_match.group(1),
                 author=author_match.group(1).strip(),
-                title=uploaded_file.name # タイトル抽出は困難なためファイル名を使用
+                title=title_extracted 
             )
             return AICoreResponse(
                 category="論文",
