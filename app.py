@@ -284,58 +284,60 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     name_re_ja = r"([一-龠ァ-ヴーあ-ん]{2,5}(?:\s*[一-龠ァ-ヴーあ-ん]{1,5})*)" 
     name_re_en = r"([A-Z][a-z]+(?:\s[A-Z][a-z\.]*)*)" 
     
-    org_keywords_re = r"(?:大学|研究室|株式会社|School of|University|Dept)"
+    org_keywords_re = r"(?:大学|研究室|学部|株式会社|School of|University|Dept)" # 学部を追加
 
     # ヘッダー内の行リスト
     header_lines = text_lines[:10]
     
     st.info("→ 構造的な著者名パターンとタイトル候補を探索中...")
     
-    # --- 2-1. タイトル行と著者名を同時に探し、位置関係で特定するロジック ---
+    # --- 2-1. 著者名とタイトルを同時に探し、位置関係で特定するロジック ---
     
     best_title_candidate = ""
-    best_author_candidate = None
     
     for i in range(len(header_lines)):
         line = header_lines[i]
         
-        # 1. 著者名（氏名のみ）を探すロジック
-        current_line_is_author = False
-        author_match = re.match(name_re_ja + r"$", line) or re.match(name_re_en + r"$", line)
-        
-        if author_match:
-            # 著者名の可能性が高い
-            current_line_is_author = True
+        # 1. 所属機関キーワードを含む行を探す (信頼性の高いマーカー)
+        if re.search(org_keywords_re, line, re.IGNORECASE):
+            st.info(f"→ 所属機関行を検出（行 {i+1}）。直前の行を著者名候補として確認します。")
             
-            # 信頼性チェック: 次の行が所属機関であるか？
-            if i + 1 < len(header_lines) and re.search(org_keywords_re, header_lines[i+1], re.IGNORECASE):
-                # 氏名行の後に所属機関があることを確認！これは確実な著者情報。
-                best_author_candidate = author_match.group(1).strip()
-                st.info(f"→ 著者名パターンを検出: {best_author_candidate}")
+            # 所属機関の直前行（i-1）が著者名の可能性が高い
+            if i > 0:
+                author_candidate_line = header_lines[i-1].strip()
+                
+                # 氏名のみのパターンにマッチするか確認
+                author_match = re.match(name_re_ja + r"$", author_candidate_line) or re.match(name_re_en + r"$", author_candidate_line)
+                
+                if author_match:
+                    # 著者名確定
+                    detected_author = author_match.group(1).strip()
+                    st.info(f"✅ 著者名パターン一致: {detected_author}")
+                    score_author_doc = max(score_author_doc, 10) 
 
-                # 著者名の直前をタイトル候補とする (タイトルが著者名の直前にあるパターンに対応)
-                if i > 0:
-                    prev_line = header_lines[i-1].strip()
-                    # ジャーナル情報ではない、ある程度の長さがある行をタイトル候補とする
-                    if len(prev_line) > 15 and not re.search(r"Vol\.\s*\d+|Journal|ISSN|doi|SCU", prev_line, re.IGNORECASE):
-                        if '抄録' not in prev_line and 'Abstract' not in prev_line:
-                            best_title_candidate = prev_line
-                            st.info(f"→ タイトル候補（直前行）を検出: {best_title_candidate[:20]}...")
-                            
-                # 最も確実な情報が見つかったので、ループを終了
-                break
+                    # 著者行のさらに直前（i-2）をタイトル候補とする
+                    if i > 1:
+                        prev_prev_line = header_lines[i-2].strip()
+                        # ジャーナル情報ではない、ある程度の長さがある行をタイトル候補とする
+                        if len(prev_prev_line) > 15 and not re.search(r"Vol\.\s*\d+|Journal|ISSN|doi|SCU", prev_prev_line, re.IGNORECASE):
+                             best_title_candidate = prev_prev_line
+                             st.info(f"→ タイトル候補（2行上）を検出: {best_title_candidate[:20]}...")
+                             
+                    # 最も確実な情報が見つかったので、ループを終了
+                    break
 
-        # 2. 氏名ではない、最も長い行を暫定タイトルとして保持
-        if not current_line_is_author and len(line) > 20 and not re.search(r"Vol\.\s*\d+|Journal|ISSN|doi|SCU|抄録|Abstract", line, re.IGNORECASE):
-            # 著者がまだ見つかっていない場合のみ、暫定タイトルとして保持（後の要約用）
-             if len(line) > len(best_title_candidate):
-                 best_title_candidate = line
-                 
+        # 2. 著者が見つかっていない場合、最も長い行を暫定タイトルとして保持
+        if detected_author is None:
+            if len(line) > 20 and not re.search(r"Vol\.\s*\d+|Journal|ISSN|doi|SCU|抄録|Abstract", line, re.IGNORECASE):
+                 if len(line) > len(best_title_candidate):
+                     best_title_candidate = line
+                     
     # 著者情報が検出された場合、スコアを確定させる
-    if best_author_candidate: 
-        detected_author = re.sub(r"[\s　]", "", best_author_candidate) # 氏名のクリーンアップ
+    if detected_author: 
+        # 氏名のクリーンアップ (全角・半角スペースを削除)
+        detected_author = re.sub(r"[\s　]", "", detected_author)
         score_author_doc = max(score_author_doc, 10) # 少なくとも10点以上を保証
-        st.info(f"✅ 著者名確定: {detected_author}")
+        st.info(f"✅ 著者名最終確定: {detected_author}")
         
     # ------------------------------------------------------------------
     # 3. 最終判定ロジック
@@ -355,7 +357,7 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         if best_title_candidate:
             title_extracted = best_title_candidate
             
-        # 2. 抽出されたタイトルが不十分または不正な場合、フォールバック（要約は信頼度ゼロのため、今回は排除）
+        # 2. 抽出されたタイトルが不十分または不正な場合、フォールバック
         if not title_extracted or len(title_extracted) < 15 or '抄録' in title_extracted.lower() or 'abstract' in title_extracted.lower():
             # 抽出失敗とみなし、ファイル名をベースにタイトルを生成
             st.warning("→ タイトル抽出候補が不十分または不正なため、ファイル名をベースにタイトルを生成します。")
@@ -561,12 +563,17 @@ if uploaded_files:
                 
                 # 4. 結果の記録とダウンロードボタンの設置
                 result_data = {
-                    "オリジナルファイル名": uploaded_file.name,
-                    "処理状況": "完了" if ai_response.category != "不明" else "失敗",
-                    "分類カテゴリ": ai_response.category,
-                    "リネーム後ファイル名": new_filename,
+                    "original_filename": uploaded_file.name,
+                    "status": "完了" if ai_response.category != "不明" else "失敗",
+                    "category": ai_response.category,
+                    "renamed_filename": new_filename,
                 }
-                results.append(result_data)
+                results.append({
+                    "オリジナルファイル名": result_data["original_filename"],
+                    "処理状況": result_data["status"],
+                    "分類カテゴリ": result_data["category"],
+                    "リネーム後ファイル名": result_data["renamed_filename"],
+                })
                 
                 st.markdown(f"**結果 ({uploaded_file.name})**:")
                 
