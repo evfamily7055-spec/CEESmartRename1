@@ -270,14 +270,13 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         score_author_doc += 5
         st.info(f"→ 著者付き文書キーワード検出 ({score_author_doc}点)")
     
-    # [再修正ポイント] 日本語・英語の著者名と所属を確実に検出する
+    # [再々修正ポイント] 日本語・英語の著者名と所属を確実に検出し、抽出後にクリーンアップ
     detected_author = None
     
-    # 1. 著者名（日本語または英語）と所属機関（大学、研究室、株式会社など）が近い行にあるかを確認
-    # (例: 町田佳世子 \n 札幌市立大学デザイン学部)
-    
-    # 著者名パターン (アルファベット、漢字、ひらがな、カタカナ)
-    name_re = r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)*|[一-龠ァ-ヴーあ-ん]+(?:\s[一-龠ァ-ヴーあ-ん]+)*)"
+    # 日本語・英語の氏名パターン (漢字, ひらがな, カタカナ, アルファベット)
+    # 複数行にまたがるノイズ（改行やスペース）を許容するため、貪欲なマッチングにする
+    name_re_ja = r"([一-龠ァ-ヴーあ-ん]+(?:\s*[一-龠ァ-ヴーあ-ん]+)*)" # 日本語名
+    name_re_en = r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)" # 英語名
     
     # 組織名パターン (大学, 研究所, 社, 部, 院, School of Design, University)
     org_keywords_re = r"(?:大学|研究室|株式会社|School of|University|Dept)"
@@ -285,28 +284,24 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
     # ヘッダー内の行リスト
     header_lines = text_lines[:10]
     
-    # 2. 行を跨いだ著者名 + 所属のパターンを探索
+    # 2. 著者名の探索とキャプチャ
     for i, line in enumerate(header_lines):
-        # 氏名らしきパターンを検出 (例: Kayoko Machida or 町田佳世子)
-        name_match = re.search(name_re, line.strip())
+        # 1. 著者名キーワード + 氏名パターンを検出 (例: 著者 町田佳世子)
+        author_match = re.search(r"(?:Author|著者|作成者|執筆者)[\s:]*?" + r"(" + name_re_ja + r"|" + name_re_en + r")", line, re.IGNORECASE)
         
-        if name_match:
-            # 氏名が見つかった場合、その次の行に所属機関があるかチェック
-            if i + 1 < len(header_lines):
-                next_line = header_lines[i+1]
-                if re.search(org_keywords_re, next_line, re.IGNORECASE):
-                    # 氏名と所属が連続するパターンを検出
-                    detected_author = name_match.group(1).strip()
-                    st.info(f"→ 構造的著者情報（{detected_author} / 行跨ぎ）検出 (+10点, 現在{score_author_doc}点)")
-                    score_author_doc += 10
-                    break
+        if author_match:
+            detected_author = author_match.group(1).strip()
             
-            # その行自体に所属機関があるかチェック (例: Author: John Doe, University of X)
-            if re.search(org_keywords_re, line, re.IGNORECASE):
-                 detected_author = name_match.group(1).strip()
-                 st.info(f"→ 構造的著者情報（{detected_author} / 同一行）検出 (+10点, 現在{score_author_doc}点)")
-                 score_author_doc += 10
-                 break
+            # 氏名のクリーンアップ (全角・半角スペースを削除)
+            detected_author = re.sub(r"[\s　]", "", detected_author)
+            
+            # 所属機関が続くかチェック
+            if re.search(org_keywords_re, line, re.IGNORECASE) or \
+               (i + 1 < len(header_lines) and re.search(org_keywords_re, header_lines[i+1], re.IGNORECASE)):
+                
+                st.info(f"→ 構造的著者情報（{detected_author}）検出 (+10点, 現在{score_author_doc}点)")
+                score_author_doc = max(score_author_doc, 10) # 少なくとも10点以上を保証
+                break # 検出したらループを抜ける
 
     # 著者情報が検出された場合、スコアを確定させる
     if detected_author: 
@@ -331,26 +326,42 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         # 抽出ロジック（著者付き文書）
         author = detected_author if detected_author else "著者名不明"
         
-        # タイトル抽出ロジックの改善: ジャーナル名や短いヘッダーを除外するため、最初の5行の中で最も長い行を採用
+        # タイトル抽出ロジックの改善
         title_extracted = os.path.splitext(uploaded_file.name)[0] # 初期値はファイル名
+        
         if len(text_lines) > 0:
             top_lines = text_lines[0:5] # 最初の5行を対象
             
-            # 著作権表示やジャーナル名は除外 (SCU Journal of Design & Nursing Vol. 13. No. 1. pp.47-53, 2019)
-            # このパターンは除外する: (アルファベット数 + 数字数) が多い行
-            
             clean_lines = []
-            for line in top_lines:
-                # 著作権/ジャーナル名っぽい行をスキップ (非常に短い行や、特定のパターンを含む行)
-                if len(line) < 10: # 短すぎる行はスキップ
+            author_line_index = -1
+            
+            # 著者やジャーナル行を特定
+            for idx, line in enumerate(top_lines):
+                # 著作権/ジャーナル名っぽい行や非常に短い行をスキップ
+                if len(line) < 10 or re.search(r"Vol\.\s*\d+|No\.\s*\d+|pp\.\s*\d+|Journal", line, re.IGNORECASE):
                     continue
-                if re.search(r"Vol\.\s*\d+|No\.\s*\d+|pp\.\s*\d+", line, re.IGNORECASE): # ジャーナル番号はスキップ
+                # 検出された著者名が含まれる行もスキップ
+                if detected_author and detected_author in re.sub(r"[\s　]", "", line):
+                    author_line_index = idx # 著者行を記録
                     continue
+                
+                # 「抄録:」や「Abstract:」で始まる行もスキップ（タイトルではないため）
+                if re.search(r"^(抄録|Abstract|Keywords):", line, re.IGNORECASE):
+                    continue
+
                 clean_lines.append(line)
 
             if clean_lines:
-                # 残った行の中で最も長い行をタイトルとする
-                title_extracted = max(clean_lines, key=len)
+                # 最初の2行をタイトル候補とする（タイトルは通常、ヘッダーのすぐ下にある）
+                title_extracted = clean_lines[0]
+                
+                # タイトル候補の行が短い場合、次の行を連結してみる
+                if len(title_extracted) < 20 and len(clean_lines) > 1:
+                     title_extracted = clean_lines[0] + " " + clean_lines[1]
+            
+            # 最終的なクリーンアップ
+            title_extracted = re.sub(r"[\s　]+", " ", title_extracted).strip() # 複数のスペースを1つに
+
         
         data = AuthorData( 
             author=author,
