@@ -5,7 +5,7 @@ import io
 import csv # CSV処理ライブラリ
 import time # ファイルアップロード後の待機用
 from pydantic import BaseModel, Field, ValidationError
-from typing import Optional, Literal, Dict, Any, List
+from typing import Optional, Literal, Dict, Any, List, Union # Unionを追加
 
 # 外部ライブラリ
 import pypdf # PDF処理ライブラリ
@@ -44,30 +44,15 @@ Category = Literal["論文", "請求書・領収書", "その他", "不明"]
 
 class AICoreResponse(BaseModel):
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
-    extracted_data: Optional[Dict[str, Any]] = Field(
+    # 修正点 1: extracted_data の型を具体的な Pydantic モデルのユニオンに変更
+    extracted_data: Optional[Union[PaperData, InvoiceData, OtherData]] = Field( 
         None, 
-        description="分類に応じた抽出データを含むオブジェクト。不明の場合は空のオブジェクト {} にしてください。オブジェクトのスキーマは category フィールドの値によって決定されます。"
+        description="分類に応じた抽出データを含むオブジェクト。不明の場合は null にしてください。このフィールドの構造は category の値に依存します。"
     )
     reasoning: str = Field(description="LLMがその分類と抽出を行った根拠。")
     transcript: Optional[str] = Field(None, description="音声ファイルが入力された場合の文字起こし結果。")
 
-# pydanticスキーマからGemini API用のJSONスキーマを生成するヘルパー関数
-def get_json_schema_for_gemini():
-    schema = AICoreResponse.model_json_schema()
-    
-    return {
-        "type": "object",
-        "properties": {
-            "category": schema["properties"]["category"],
-            "extracted_data": {
-                "type": "object",
-                "description": "分類に応じてPaperData, InvoiceData, OtherDataのいずれかのスキーマに従うオブジェクト。",
-            },
-            "reasoning": schema["properties"]["reasoning"],
-            "transcript": schema["properties"]["transcript"]
-        },
-        "required": ["category", "reasoning"]
-    }
+# 修正点 2: get_json_schema_for_gemini 関数を削除し、直接 AICoreResponse.model_json_schema() を使用
 
 # ----------------------------------------------------------------------
 # 2. バックエンド処理機能 (ファイル抽出とAIコア連携)
@@ -225,7 +210,7 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
             invoice_amount="15000円",
             invoice_issuer="田中商事",
             invoice_subject="ソフトウェアライセンス"
-        ).model_dump()
+        )
         return AICoreResponse(
             category="請求書・領収書",
             extracted_data=data,
@@ -235,7 +220,7 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
 
     # 文書ファイルのモック応答 (文書の内容がエラーでないか確認)
     if "処理中にエラーが発生しました" in text_content:
-        return AICoreResponse(category="不明", extracted_data={}, reasoning="ファイル処理中にエラーが発生し、内容を取得できませんでした。")
+        return AICoreResponse(category="不明", extracted_data=None, reasoning="ファイル処理中にエラーが発生し、内容を取得できませんでした。")
     
     # 文書ファイルのモック応答 (以前と同じロジック)
     if "請求書" in text_content or "Google株式会社" in text_content or "領収書" in text_content:
@@ -244,7 +229,7 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
             invoice_amount="25,000円",
             invoice_issuer="Google株式会社",
             invoice_subject="AIサービス利用料"
-        ).model_dump()
+        )
         return AICoreResponse(
             category="請求書・領収書",
             extracted_data=data,
@@ -255,7 +240,7 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
             year="2025",
             author="J. Smith, A. Brown",
             title="The Impact of AI on File Management"
-        ).model_dump()
+        )
         return AICoreResponse(
             category="論文",
             extracted_data=data,
@@ -264,7 +249,7 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
     else:
         data = OtherData(
             title="新しいAI時代のファイル管理"
-        ).model_dump()
+        )
         return AICoreResponse(
             category="その他",
             extracted_data=data,
@@ -274,8 +259,11 @@ def get_ai_core_response_mock(text_content: str, uploaded_file: st.runtime.uploa
 # 実際のAPI連携関数 (マルチモーダル対応)
 def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file: st.runtime.uploaded_file_manager.UploadedFile, is_asr: bool) -> AICoreResponse:
     """
-    Gemini APIを呼び出し、構造化されたJSON応答を取得し、さらに抽出データの内容を検証する。
+    Gemini APIを呼び出し、構造化されたJSON応答を取得し、Pydanticで厳密に検証する。
     """
+    # 応答スキーマを Pydantic モデルから直接生成
+    response_schema = AICoreResponse.model_json_schema()
+
     system_instruction = f"""
     あなたはファイルの内容を分析し、リネームのための構造化データを抽出するAIです。
 
@@ -286,8 +274,8 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
     提供されたテキスト内容（OCR結果を含む）を分析し、以下のいずれかのカテゴリに分類し、'extracted_data' に必要な情報を抽出してください。
 
     [全JSON出力ルール]
-    1. 応答は必ずJSON形式で、スキーマ `{AICoreResponse.__name__}` に厳密に従ってください。
-    2. 'category' に応じて、'extracted_data' のスキーマを適用してください。
+    1. 応答は必ずJSON形式で、提供されたスキーマに厳密に従ってください。
+    2. 'category' が "不明" の場合、'extracted_data' は必ず null にしてください。
     3. JSON以外の追加のテキストは一切含めないでください。
     """
     
@@ -304,7 +292,7 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
             )
         except Exception as e:
             st.error(f"🚨 ファイルアップロードエラー: {e}")
-            return AICoreResponse(category="不明", extracted_data={}, reasoning=f"音声ファイルのアップロードに失敗: {e}")
+            return AICoreResponse(category="不明", extracted_data=None, reasoning=f"音声ファイルのアップロードに失敗: {e}")
 
         parts.append(uploaded_file_gemini)
         parts.append(f"この音声ファイルの内容を文字起こしし、その結果に基づき、内容を分析して以下の構造化データ形式で抽出してください。")
@@ -324,69 +312,45 @@ def get_ai_core_response(client: genai.Client, text_content: str, uploaded_file:
             system_instruction=system_instruction,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=get_json_schema_for_gemini(),
+                # Pydantic スキーマを直接渡す
+                response_schema=response_schema, 
                 timeout=120  
             )
         )
         
-        # --- 修正箇所: JSONパース前に応答テキストをクリーンアップ ---
+        # --- JSONパース前のクリーンアップ (前回の修正を保持) ---
         response_text = response.text.strip()
-        # 応答の前後から ```json や ``` を取り除く
         if response_text.startswith("```json"):
             response_text = response_text[7:].strip()
         if response_text.endswith("```"):
             response_text = response_text[:-3].strip()
         
-        # 空の応答チェックを追加
         if not response_text:
             raise json.JSONDecodeError("Received empty response text.", "response.text", 0)
 
         response_json = json.loads(response_text)
-        # --------------------------------------------------------
         
-        # 1. 応答の基本構造 (category, reasoningなど) を検証
-        base_validated_response = AICoreResponse.model_validate(response_json)
+        # 修正点 3: Pydantic の Union 型検証により、一度のバリデーションで済む
+        final_response = AICoreResponse.model_validate(response_json)
         
-        category = base_validated_response.category
-        extracted_data = base_validated_response.extracted_data
-        
-        # 2. extracted_data の中身を category に基づいて再検証 (重点的な修正ポイント)
-        if category == "論文":
-            Validator = PaperData
-        elif category == "請求書・領収書":
-            Validator = InvoiceData
-        elif category == "その他":
-            Validator = OtherData
-        else: # "不明" またはその他の予期せぬカテゴリ
-            Validator = None
-        
-        if Validator and extracted_data:
-            try:
-                # 抽出データのサブクラス検証
-                Validator.model_validate(extracted_data)
-            except ValidationError as e:
-                # 構造化データの内容検証に失敗した場合
-                error_msg = f"LLMの抽出データが {Validator.__name__} スキーマに不適合です。エラー詳細: {e.errors()[:3]} (一部)"
-                st.error(f"❌ 構造化データ内容エラー: {error_msg}")
-                return AICoreResponse(category="不明", extracted_data={}, reasoning=f"AI抽出データの内容検証に失敗: {error_msg}")
-        
-        # すべての検証に成功した場合
-        final_response = base_validated_response
         return final_response
 
     except APIError as e:
         st.error(f"❌ Gemini APIエラーが発生しました: {e}")
-        return AICoreResponse(category="不明", extracted_data={}, reasoning=f"APIエラー: {e}")
+        return AICoreResponse(category="不明", extracted_data=None, reasoning=f"APIエラー: {e}")
     except json.JSONDecodeError:
-        st.error(f"❌ Geminiからの応答が不正なJSON形式でした。生の応答: {response.text[:200]}...")
-        return AICoreResponse(category="不明", extracted_data={}, reasoning="API応答のJSON解析に失敗しました。")
+        st.error(f"❌ Geminiからの応答が不正なJSON形式でした。生の応答: {response_text[:200]}...")
+        return AICoreResponse(category="不明", extracted_data=None, reasoning="AI応答のJSON解析に失敗しました。不正な形式のJSONが出力されました。")
     except ValidationError as e:
-        # 応答の基本構造 (AICoreResponse自体) の検証に失敗した場合
-        st.error(f"❌ 基本構造検証エラー: Geminiの出力がAICoreResponseスキーマに一致しませんでした。{e.errors()[:3]} (一部)")
-        return AICoreResponse(category="不明", extracted_data={}, reasoning="AI応答がAICoreResponseスキーマ検証に失敗しました。")
+        # Pydantic の厳密な検証 (Union型を含む) に失敗した場合
+        st.error(f"❌ 構造化データ検証失敗: LLMの出力が要求スキーマに一致しません。")
+        # デバッグのためにエラーの詳細をログ出力
+        st.json({"validation_error_details": e.errors(), "raw_response_text": response_text[:500]})
+        
+        return AICoreResponse(category="不明", extracted_data=None, reasoning="AI応答がAICoreResponseスキーマ検証に失敗しました。詳細をログで確認してください。")
     except Exception as e:
         st.error(f"❌ 予期せぬエラーが発生しました: {e}")
-        return AICoreResponse(category="不明", extracted_data={}, reasoning=f"予期せぬエラー: {e}")
+        return AICoreResponse(category="不明", extracted_data=None, reasoning=f"予期せぬエラー: {e}")
     finally:
         # 3. アップロードしたファイルを削除 (リソースの節約とセキュリティのため)
         if is_asr and uploaded_file_gemini:
@@ -401,8 +365,10 @@ def apply_rename_rule(ai_response: AICoreResponse, original_name: str) -> str:
     """
     base_name, ext = os.path.splitext(original_name)
     category = ai_response.category
-    data = ai_response.extracted_data or {}
     
+    # データを dict 形式で取得。extracted_data が None の場合は空の dict を使用
+    data = ai_response.extracted_data.model_dump() if ai_response.extracted_data else {} 
+
     # ファイル名に使用できない文字を削除/置換するヘルパー関数
     def sanitize_filename(name: str) -> str:
         safe_name = name.replace(' ', '_')
@@ -586,6 +552,7 @@ if uploaded_files:
         st.markdown("---")
         st.subheader("💡 最終AI分析結果 (構造化データ)")
         if 'ai_response' in locals() and ai_response:
+            # Pydanticモデルを辞書に変換して表示
             st.json(ai_response.model_dump())
         else:
             st.write("ファイルが処理されていません。")
