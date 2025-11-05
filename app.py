@@ -22,9 +22,8 @@ from pptx import Presentation # PPTX処理ライブラリ (python-pptx)
 # 1. データ構造の定義 (Pydanticで継続)
 # ----------------------------------------------------------------------
 
-# 論文データ => 著者付き文書データに名称変更
+# 著者付き文書データ
 class AuthorData(BaseModel):
-    # year: str = Field(description="出版年西暦 (例: 2024)") # 年号は必須ではないためロジックでのみ利用
     author: str = Field(description="主要著者名。カンマ区切りで記述してください。")
     title: str = Field(description="文書のタイトル。")
 
@@ -43,11 +42,9 @@ class OtherData(BaseModel):
 Category = Literal["論文", "請求書・領収書", "その他", "不明"]
 
 class AICoreResponse(BaseModel):
-    # 余分な入力を無視する設定
     model_config = ConfigDict(extra='ignore')
 
     category: Category = Field(description="ファイルの分類カテゴリ。必須。取りうる値: 論文, 請求書・領収書, その他, 不明")
-    # AuthorData (旧 PaperData) を使用
     extracted_data: Optional[Union[AuthorData, InvoiceData, OtherData, Dict[str, Any]]] = Field( 
         None, 
         description="分類に応じた抽出データを含むオブジェクト。不明の場合は null にしてください。"
@@ -75,7 +72,6 @@ def extract_text(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -
     # --- 音声ファイル処理 (フラグを返す) ---
     if file_ext in ['mp3', 'wav', 'm4a']:
         st.info(f"🔊 音声ファイル ({uploaded_file.name}): ローカルASR処理モックを使用します。")
-        # ⚠️ Geminiを使わないため、ASRはローカルでモックとして処理する
         return uploaded_file.name, True 
 
     # --- PDF 処理 (安定性強化) ---
@@ -230,7 +226,10 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
 
     # 文書ファイルの内容分析 (ルールベース)
     lower_text = text_content.lower()
-    first_10_lines = '\n'.join(text_content.split('\n')[:10]).strip() # 先頭10行を分析
+    
+    # ヘッダー情報の準備: ジャーナル名などのノイズを排除しやすいよう、最初の数行を抽出
+    text_lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+    first_10_lines = '\n'.join(text_lines[:10]).strip() 
     
     # 処理状況の表示
     st.info("🔎 **分析開始**: 文書ファイルの内容をローカルルールでスコアリングします。")
@@ -271,66 +270,49 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         score_author_doc += 5
         st.info(f"→ 著者付き文書キーワード検出 ({score_author_doc}点)")
     
-    # [修正ポイント] 著者名検出の正規表現を日本語名と英語名に対応させる
-    # 修正前: author_pattern = re.search(r"(?:Author|著者|作成者|執筆者)\s*[:]?\s*([A-Z][a-z]+(?:\s*[A-Z][a-z]+)?)\s*(?:\((.+?)\))?", first_10_lines)
-    # 修正後: 氏名パターンを「漢字/ひらがな/カタカナ」または「英語名」のいずれかに広く対応させる
-    
-    # 複雑なパターン: 「著者名（所属）」または「著者名（改行）所属」を捉える。
-    # [^:]*?: コロン以外の任意の文字（氏名/タイトル）
-    # (?:Author|著者|作成者|執筆者): キーワードのいずれか
-    # ([A-Z][a-z]+(?:\s*[A-Z][a-z]+)?): 英語名パターン
-    # (?:[\u3005\u3006\u303b\u4e00-\u9faf\u3040-\u309f\u30a0-\u30ff]+) : 日本語名パターン
-    
-    # 今回は、シンプルに「著者名の後に所属機関名が続くパターン」を幅広くカバーする
-    author_pattern_match = re.search(
-        r"(?:Author|著者|作成者|執筆者)[:\s]*\s*([^,\n]+?)\s*(\([^\n]+\)|[^\n]*\s*[大|会|学|社|科|院|部|校][^\n]*)", 
-        first_10_lines, 
-        re.IGNORECASE | re.DOTALL
-    )
-    
-    # 日本語/英語両対応の著者名（氏名のみ）をキャプチャするパターン
-    name_pattern = r"([^,\n]+?)" # 氏名は、改行やカンマまで
-    
-    # 「氏名 + 所属」または「氏名 + 役職」がヘッダーにあるか
-    author_pattern = re.search(
-        r"(?:Author|著者|作成者|執筆者)[\s:]*?(" + name_pattern + r")\s*(\([^\)]+\)|[^\n]+\s*[大|学|社|会|科|院|部|校][^\n]*?)", 
-        first_10_lines, 
-        re.IGNORECASE | re.DOTALL
-    )
-    
-    # シンプルな「氏名」単体のパターン (例: 町田佳世子 札幌市立大学デザイン学部)
-    # 氏名のパターンを寛容にする: 任意の文字 (\w) を含む、改行やカンマを含まない文字列
-    author_simple_pattern = re.search(
-        r"(?:Author|著者|作成者|執筆者)[\s:]*?([^\n,]+)", 
-        first_10_lines, 
-        re.IGNORECASE
-    )
-    
-    # 今回のPDFの形式 ('町田佳世子\n 札幌市立大学デザイン学部')に対応するため、
-    # 著者の後に所属機関名（日本語の組織名を含む）が続くパターンを優先する
-    
-    # 氏名（日本語または英語）をキャプチャするパターン
-    name_capture_group = r"([^,\n\s]+(?:\s[^,\n\s]+)*?)"
-    
-    # 氏名が検出され、その後に所属機関っぽいキーワードが続くパターン
-    author_doc_match = re.search(
-        r"(?:Author|著者|作成者|執筆者)[\s:]*?" + name_capture_group + r"\s*([^\n]*?大学|[^\n]*?研究室|[^\n]*?株式会社)",
-        first_10_lines,
-        re.IGNORECASE | re.DOTALL
-    )
-    
-    # 最終的な著者情報検出に使用する変数
+    # [再修正ポイント] 日本語・英語の著者名と所属を確実に検出する
     detected_author = None
-    if author_doc_match:
-        detected_author = author_doc_match.group(1).strip()
-        st.info(f"→ **構造的著者情報（{detected_author}）**検出 (+10点, 現在{score_author_doc}点)")
-        score_author_doc += 10 # 構造的な著者情報検出
     
+    # 1. 著者名（日本語または英語）と所属機関（大学、研究室、株式会社など）が近い行にあるかを確認
+    # (例: 町田佳世子 \n 札幌市立大学デザイン学部)
     
+    # 著者名パターン (アルファベット、漢字、ひらがな、カタカナ)
+    name_re = r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)*|[一-龠ァ-ヴーあ-ん]+(?:\s[一-龠ァ-ヴーあ-ん]+)*)"
+    
+    # 組織名パターン (大学, 研究所, 社, 部, 院, School of Design, University)
+    org_keywords_re = r"(?:大学|研究室|株式会社|School of|University|Dept)"
+
+    # ヘッダー内の行リスト
+    header_lines = text_lines[:10]
+    
+    # 2. 行を跨いだ著者名 + 所属のパターンを探索
+    for i, line in enumerate(header_lines):
+        # 氏名らしきパターンを検出 (例: Kayoko Machida or 町田佳世子)
+        name_match = re.search(name_re, line.strip())
+        
+        if name_match:
+            # 氏名が見つかった場合、その次の行に所属機関があるかチェック
+            if i + 1 < len(header_lines):
+                next_line = header_lines[i+1]
+                if re.search(org_keywords_re, next_line, re.IGNORECASE):
+                    # 氏名と所属が連続するパターンを検出
+                    detected_author = name_match.group(1).strip()
+                    st.info(f"→ 構造的著者情報（{detected_author} / 行跨ぎ）検出 (+10点, 現在{score_author_doc}点)")
+                    score_author_doc += 10
+                    break
+            
+            # その行自体に所属機関があるかチェック (例: Author: John Doe, University of X)
+            if re.search(org_keywords_re, line, re.IGNORECASE):
+                 detected_author = name_match.group(1).strip()
+                 st.info(f"→ 構造的著者情報（{detected_author} / 同一行）検出 (+10点, 現在{score_author_doc}点)")
+                 score_author_doc += 10
+                 break
+
+    # 著者情報が検出された場合、スコアを確定させる
+    if detected_author: 
+        score_author_doc = max(score_author_doc, 10) # 少なくとも10点以上を保証
+        
     year_match = re.search(r"(\d{4})", first_10_lines)
-    
-    if detected_author: # 著者名が検出された場合
-        score_author_doc += 10 # 構造的な著者情報検出（再加算ではなく、確実に10点以上にするための補強）
     
     if year_match and score_author_doc > 0:
         score_author_doc += 3 # 年号が検出され、かつ著者付き文書の可能性が高い場合
@@ -349,27 +331,35 @@ def analyze_file_content(text_content: str, uploaded_file: st.runtime.uploaded_f
         # 抽出ロジック（著者付き文書）
         author = detected_author if detected_author else "著者名不明"
         
-        # タイトルはテキストの最初の非空白行とする (最も確実)
-        # ただし、最初の行が著者名でないことを確認する必要がある (今回は最初の行がタイトルなのでOKとする)
-        title_lines = [line for line in text_content.split('\n') if line.strip()]
-        
-        # 最初の3行から最も長い行をタイトルと見なすロジック（日本語文書対応）
+        # タイトル抽出ロジックの改善: ジャーナル名や短いヘッダーを除外するため、最初の5行の中で最も長い行を採用
         title_extracted = os.path.splitext(uploaded_file.name)[0] # 初期値はファイル名
-        if len(title_lines) > 0:
-            # 最初の数行の最も長いものをタイトルとする
-            top_lines = title_lines[:4]
-            # 著作権表記（Copyrightなど）やジャーナル名は除外したいが、ここでは最も長いものを採用
-            title_extracted = max(top_lines, key=len)
+        if len(text_lines) > 0:
+            top_lines = text_lines[0:5] # 最初の5行を対象
+            
+            # 著作権表示やジャーナル名は除外 (SCU Journal of Design & Nursing Vol. 13. No. 1. pp.47-53, 2019)
+            # このパターンは除外する: (アルファベット数 + 数字数) が多い行
+            
+            clean_lines = []
+            for line in top_lines:
+                # 著作権/ジャーナル名っぽい行をスキップ (非常に短い行や、特定のパターンを含む行)
+                if len(line) < 10: # 短すぎる行はスキップ
+                    continue
+                if re.search(r"Vol\.\s*\d+|No\.\s*\d+|pp\.\s*\d+", line, re.IGNORECASE): # ジャーナル番号はスキップ
+                    continue
+                clean_lines.append(line)
+
+            if clean_lines:
+                # 残った行の中で最も長い行をタイトルとする
+                title_extracted = max(clean_lines, key=len)
         
-        data = AuthorData( # AuthorDataを使用
+        data = AuthorData( 
             author=author,
             title=title_extracted 
         )
-        # Yearはリネーム形式から削除したため、抽出データには含めない
         return AICoreResponse(
             category="論文", # 要件定義書の分類カテゴリは「論文」を維持
             extracted_data=data,
-            reasoning=f"高度なパターンマッチングにより、著者情報（氏名パターン）とキーワードを検出（{score_author_doc}点）。著者付き文書と判定しました。",
+            reasoning=f"高度なパターンマッチングにより、著者情報（氏名と所属の組み合わせ）とキーワードを検出（{score_author_doc}点）。著者付き文書と判定しました。",
         )
 
     # 請求書と判定
@@ -424,7 +414,6 @@ def apply_rename_rule(ai_response: AICoreResponse, original_name: str) -> str:
     category = ai_response.category
     
     # データを dict 形式で取得。extracted_data が None の場合は空の dict を使用
-    # モック処理なので、Pydanticモデルから直接 dict に変換 (エラー回避のため)
     data = ai_response.extracted_data.model_dump() if ai_response.extracted_data else {} 
 
     # ファイル名に使用できない文字を削除/置換するヘルパー関数
@@ -440,7 +429,6 @@ def apply_rename_rule(ai_response: AICoreResponse, original_name: str) -> str:
 
     # 1. 論文 (要件 6.1) -> 著者付き文書としてリネーム (年号なし)
     elif category == "論文":
-        # year = data.get("year", "YYYY") # 年号は使用しない
         authors = data.get("author", "著者名不明")
         title = data.get("title", "タイトル不明")
 
